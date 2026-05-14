@@ -198,7 +198,6 @@ enum TunnelService {
         </plist>
         """
         // LaunchDaemons need root - use osascript for admin
-        let escapedPlist = plist.replacingOccurrences(of: "\"", with: "\\\"").replacingOccurrences(of: "\n", with: "\\n")
         let script = """
         do shell script "echo '\(plist.replacingOccurrences(of: "'", with: "'\\''"))' > /Library/LaunchDaemons/\(daemonLabel).plist && launchctl load /Library/LaunchDaemons/\(daemonLabel).plist" with administrator privileges
         """

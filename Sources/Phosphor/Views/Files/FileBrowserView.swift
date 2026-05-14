@@ -241,16 +241,15 @@ struct FileBrowserView: View {
 
     private func handleDrop(providers: [NSItemProvider]) {
         for provider in providers {
-            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
                 guard let data = item as? Data,
                       let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
 
                 let localPath = url.path
                 let fileName = url.lastPathComponent
-                let devicePath = (fileManager.currentPath as NSString).appendingPathComponent(fileName)
-
-                let currentDir = fileManager.currentPath
                 Task { @MainActor in
+                    let currentDir = fileManager.currentPath
+                    let devicePath = (currentDir as NSString).appendingPathComponent(fileName)
                     do {
                         try await fileManager.copyToDevice(localPath: localPath, devicePath: devicePath)
                         dragDropStatus = "Transferred: \(fileName)"

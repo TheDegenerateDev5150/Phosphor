@@ -79,9 +79,9 @@ final class NativeBackupService: ObservableObject {
         return false
         """
 
-        let result = await Shell.runAsync("osascript", arguments: ["-e", script], timeout: 10)
-        // Finder AppleScript backup is not directly scriptable - this is a detection only
-        // The actual backup must be initiated through MobileDevice framework
+        _ = await Shell.runAsync("osascript", arguments: ["-e", script], timeout: 10)
+        // Finder AppleScript backup is not directly scriptable - this is a detection only.
+        // The actual backup must be initiated through MobileDevice framework.
         return false
     }
 
@@ -101,7 +101,7 @@ final class NativeBackupService: ObservableObject {
         defer { dlclose(handle) }
 
         // Look up AMSBackupWithOptions
-        guard let sym = dlsym(handle, "AMSBackupWithOptions") else {
+        guard dlsym(handle, "AMSBackupWithOptions") != nil else {
             lastError = "AMSBackupWithOptions not found in framework"
             return false
         }
