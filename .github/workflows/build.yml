@@ -51,6 +51,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Require signing secrets
+        run: |
+          set -e
+          missing=()
+          [ -n "${DEVELOPER_ID_P12_BASE64:-}" ] || missing+=(DEVELOPER_ID_P12_BASE64)
+          [ -n "${DEVELOPER_ID_P12_PASSWORD:-}" ] || missing+=(DEVELOPER_ID_P12_PASSWORD)
+          [ -n "${DEVELOPER_ID:-}" ] || missing+=(DEVELOPER_ID)
+          [ -n "${APPLE_ID:-}" ] || missing+=(APPLE_ID)
+          [ -n "${APP_PASSWORD:-}" ] || missing+=(APPLE_ID_PASSWORD)
+          [ -n "${TEAM_ID:-}" ] || missing+=(APPLE_TEAM_ID)
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "::error::Refusing to publish unsigned release. Missing GitHub secrets: ${missing[*]}"
+            echo "Configure them at: https://github.com/${{ github.repository }}/settings/secrets/actions"
+            exit 1
+          fi
+
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_15.4.app
 
@@ -120,9 +136,22 @@ jobs:
           set -euo pipefail
           DMG=".build/Phosphor.dmg"
           if [ ! -f "$DMG" ]; then
-            echo "No DMG produced - skipping cask update."
-            exit 0
+            echo "::error::No DMG produced - cannot update cask."
+            exit 1
           fi
+
+          # Guard: refuse to bump the cask unless the DMG is both Gatekeeper-approved
+          # and has a stapled notarization ticket. Prevents shipping an unsigned
+          # build that brew users would then fail to install.
+          if ! spctl -a -vv -t install "$DMG" 2>&1 | grep -q "accepted"; then
+            echo "::error::DMG is not Gatekeeper-approved. Cask not updated."
+            exit 1
+          fi
+          if ! xcrun stapler validate "$DMG" >/dev/null 2>&1; then
+            echo "::error::DMG has no stapled notarization ticket. Cask not updated."
+            exit 1
+          fi
+
           TAG="${GITHUB_REF##*/}"
           VERSION="${TAG#v}"
           SHA=$(shasum -a 256 "$DMG" | awk '{print $1}')
