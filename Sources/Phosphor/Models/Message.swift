@@ -76,6 +76,7 @@ enum MessageExportFormat: String, CaseIterable {
     case txt = "Plain Text"
     case html = "HTML"
     case json = "JSON"
+    case mbox = "MBOX (Mail)"
 
     var fileExtension: String {
         switch self {
@@ -83,6 +84,7 @@ enum MessageExportFormat: String, CaseIterable {
         case .txt: return "txt"
         case .html: return "html"
         case .json: return "json"
+        case .mbox: return "mbox"
         }
     }
 }

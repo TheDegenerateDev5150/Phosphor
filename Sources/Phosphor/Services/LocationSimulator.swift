@@ -20,7 +20,7 @@ final class LocationSimulator: ObservableObject {
         if !result.success {
             let stderr = result.stderr.lowercased()
             if stderr.contains("tunneld") || stderr.contains("start-tunnel") || stderr.contains("unable to connect") {
-                error = "iOS 17+ requires tunnel service.\nRun: sudo pymobiledevice3 remote tunneld"
+                error = "iOS 17+ requires tunnel service.\nRun: \(PyMobileDevice.tunneldCommand())"
             } else if stderr.contains("developer mode") || stderr.contains("developermode") {
                 error = "Enable Developer Mode on device:\nSettings > Privacy & Security > Developer Mode"
             } else {

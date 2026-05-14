@@ -120,6 +120,20 @@ enum PyMobileDevice {
         findBinary()
     }
 
+    /// Sudo-safe command for `pymobiledevice3 remote tunneld` that works even
+    /// when sudo's secure_path strips the user's PATH (issue #11).
+    /// Falls back to a generic command when the binary cannot be located yet.
+    static func tunneldCommand() -> String {
+        guard let binary = findBinary() else {
+            return "sudo -E env \"PATH=$PATH\" pymobiledevice3 remote tunneld"
+        }
+        if usesDirectBinary {
+            return "sudo \"\(binary)\" remote tunneld"
+        } else {
+            return "sudo \"\(binary)\" -m pymobiledevice3 remote tunneld"
+        }
+    }
+
     /// Run a pymobiledevice3 subcommand synchronously.
     @discardableResult
     static func run(_ subcommands: [String], timeout: TimeInterval = 60) -> Shell.Result {
@@ -377,28 +391,40 @@ enum PyMobileDevice {
     /// List files at a remote path on device.
     /// pymobiledevice3 outputs full paths like "/DCIM/100APPLE" - we extract just the name.
     static func afcList(path: String, udid: String? = nil) async -> [String] {
+        await afcListRaw(path: path, udid: udid).entries
+    }
+
+    /// Detailed AFC list that preserves success/stderr so callers can distinguish
+    /// "directory empty" from "permission denied" or "device not paired".
+    struct AFCListResult {
+        let succeeded: Bool
+        let entries: [String]
+        let stderr: String
+    }
+
+    static func afcListRaw(path: String, udid: String? = nil) async -> AFCListResult {
         var args = ["afc", "ls", path]
         if let udid { args += ["--udid", udid] }
 
         let result = await runAsync(args)
-        guard result.succeeded else { return [] }
+        guard result.succeeded else {
+            return AFCListResult(succeeded: false, entries: [], stderr: result.stderr)
+        }
 
         let normalizedPath = path.hasSuffix("/") ? path : path + "/"
-        return result.output.components(separatedBy: "\n")
+        let entries = result.output.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-            .compactMap { line in
-                // Output is full paths: "/DCIM/100APPLE". First line is the dir itself.
-                // Strip the queried path prefix and return just the name.
+            .compactMap { line -> String? in
                 if line == path || line == path + "/" { return nil }
                 if line.hasPrefix(normalizedPath) {
                     let name = String(line.dropFirst(normalizedPath.count))
                     return name.isEmpty ? nil : name
                 }
-                // If no prefix (some versions output just names), return as-is
                 let name = (line as NSString).lastPathComponent
                 return name.isEmpty || name == "." || name == ".." ? nil : name
             }
+        return AFCListResult(succeeded: true, entries: entries, stderr: result.stderr)
     }
 
     /// Pull (download) file/directory from device to local path.

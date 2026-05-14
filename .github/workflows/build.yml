@@ -114,3 +114,28 @@ jobs:
         with:
           files: .build/Phosphor.dmg
           generate_release_notes: true
+
+      - name: Update in-tree Homebrew cask
+        run: |
+          set -euo pipefail
+          DMG=".build/Phosphor.dmg"
+          if [ ! -f "$DMG" ]; then
+            echo "No DMG produced - skipping cask update."
+            exit 0
+          fi
+          TAG="${GITHUB_REF##*/}"
+          VERSION="${TAG#v}"
+          SHA=$(shasum -a 256 "$DMG" | awk '{print $1}')
+          CASK="Homebrew/phosphor.rb"
+          /usr/bin/sed -i '' -E "s/^  version \".*\"/  version \"${VERSION}\"/" "$CASK"
+          /usr/bin/sed -i '' -E "s/^  sha256 \".*\"/  sha256 \"${SHA}\"/" "$CASK"
+          echo "Updated $CASK to ${VERSION} / ${SHA}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$CASK"
+          if ! git diff --cached --quiet; then
+            git commit -m "homebrew: bump cask to ${TAG} (auto)"
+            git push origin HEAD:main
+          else
+            echo "Cask already up-to-date."
+          fi

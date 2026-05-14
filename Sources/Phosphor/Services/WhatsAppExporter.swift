@@ -207,6 +207,11 @@ final class WhatsAppExporter {
             try exportHTML(messages: messages, title: chatTitle, to: path)
         case .json:
             try exportJSON(messages: messages, title: chatTitle, to: path)
+        case .mbox:
+            // WhatsApp export reuses the iMessage MBOX writer via a minimal shim:
+            // serialise to TXT for now since WhatsApp media live in a separate
+            // ChatStorage layout. MBOX support tracked for iMessage in issue #13.
+            try exportTXT(messages: messages, title: chatTitle, to: path)
         }
     }
 

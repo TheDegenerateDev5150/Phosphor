@@ -326,7 +326,7 @@ struct DiagnosticsView: View {
                 EmptyStateView(
                     icon: "cpu",
                     title: "No Processes",
-                    subtitle: "On iOS 17+, run in Terminal first:\nsudo pymobiledevice3 remote tunneld"
+                    subtitle: "On iOS 17+, run in Terminal first:\n\(PyMobileDevice.tunneldCommand())"
                 )
             } else {
                 List(diagVM.processes) { proc in

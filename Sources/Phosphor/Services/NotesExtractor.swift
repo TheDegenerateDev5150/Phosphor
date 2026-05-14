@@ -6,6 +6,38 @@ import Foundation
 /// The database uses Core Data (ZICCLOUDSYNCINGOBJECT table).
 final class NotesExtractor {
 
+    enum NotesError: Error, LocalizedError {
+        case notFound
+        case fileMissing(path: String)
+        case encrypted(path: String)
+        case unsupportedSchema(tables: [String])
+        case openFailed(underlying: String)
+
+        var errorDescription: String? {
+            switch self {
+            case .notFound:
+                return "NoteStore.sqlite was not found in this backup. Notes may not have been included - check the backup contents or re-run the backup."
+            case .fileMissing(let path):
+                return "Notes database missing on disk at \(path). The backup may be incomplete."
+            case .encrypted(let path):
+                return """
+                Notes database appears to be encrypted at \(path).
+                iOS keeps the encrypted-backup flag at the device level. Open Finder -> the device -> uncheck 'Encrypt local backup', then make a fresh backup. Phosphor cannot open encrypted Notes without the backup password.
+                """
+            case .unsupportedSchema(let tables):
+                return """
+                Notes database does not contain a recognised schema (modern ZICCLOUDSYNCINGOBJECT or legacy ZNOTEBODY). This usually means the database came from an unsupported iOS version or is partially restored. Tables found: \(tables.prefix(8).joined(separator: ", "))\(tables.count > 8 ? ", ..." : "")
+                """
+            case .openFailed(let underlying):
+                return "Could not open NoteStore.sqlite: \(underlying)"
+            }
+        }
+    }
+
+    /// Leading magic bytes of a SQLite 3 database file. Used to distinguish an
+    /// encrypted/garbled blob (no header) from a real SQLite file.
+    private static let sqliteMagic = Data("SQLite format 3\0".utf8)
+
     private let db: SQLiteReader
 
     struct Note: Identifiable, Hashable {
@@ -44,7 +76,25 @@ final class NotesExtractor {
     }
 
     init(databasePath: String) throws {
-        self.db = try SQLiteReader(path: databasePath)
+        // Preflight: distinguish missing / encrypted / corrupt files so the UI
+        // doesn't surface the opaque "SQLite prepare failed" error from issue #9.
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: databasePath) else {
+            throw NotesError.fileMissing(path: databasePath)
+        }
+        if let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: databasePath)) {
+            defer { try? handle.close() }
+            let header = try? handle.read(upToCount: Self.sqliteMagic.count)
+            if header != Self.sqliteMagic {
+                throw NotesError.encrypted(path: databasePath)
+            }
+        }
+
+        do {
+            self.db = try SQLiteReader(path: databasePath)
+        } catch {
+            throw NotesError.openFailed(underlying: error.localizedDescription)
+        }
     }
 
     /// Initialize from a backup directory.
@@ -54,14 +104,12 @@ final class NotesExtractor {
         let noteStoreEntry = candidates.first { $0.isFile && $0.relativePath.hasSuffix("NoteStore.sqlite") }
 
         guard let entry = noteStoreEntry else {
-            throw NSError(domain: "Phosphor", code: 404,
-                          userInfo: [NSLocalizedDescriptionKey: "NoteStore.sqlite not found in backup"])
+            throw NotesError.notFound
         }
 
         let filePath = entry.diskPath(backupRoot: backupPath)
         guard FileManager.default.fileExists(atPath: filePath) else {
-            throw NSError(domain: "Phosphor", code: 404,
-                          userInfo: [NSLocalizedDescriptionKey: "NoteStore.sqlite file not found on disk"])
+            throw NotesError.fileMissing(path: filePath)
         }
 
         try self.init(databasePath: filePath)
@@ -79,7 +127,7 @@ final class NotesExtractor {
             return try getFoldersLegacy()
         }
 
-        return []
+        throw NotesError.unsupportedSchema(tables: tables)
     }
 
     private func getFoldersModern() throws -> [NoteFolder] {
@@ -127,7 +175,7 @@ final class NotesExtractor {
             return try getNotesLegacy(folderId: folderId)
         }
 
-        return []
+        throw NotesError.unsupportedSchema(tables: tables)
     }
 
     private func getNotesModern(folderId: Int?) throws -> [Note] {

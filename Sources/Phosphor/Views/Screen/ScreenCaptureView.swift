@@ -163,12 +163,14 @@ struct ScreenCaptureView: View {
 
                 Text("Option 2: Run manually in Terminal")
                     .font(.system(size: 12, weight: .medium))
+                let manualCmd = PyMobileDevice.tunneldCommand()
                 HStack {
-                    Text("sudo pymobiledevice3 remote tunneld")
+                    Text(manualCmd)
                         .font(.system(size: 12, design: .monospaced))
                         .textSelection(.enabled)
+                        .lineLimit(2)
                     Button {
-                        "sudo pymobiledevice3 remote tunneld".copyToClipboard()
+                        manualCmd.copyToClipboard()
                     } label: {
                         Image(systemName: "doc.on.doc")
                             .font(.system(size: 11))

@@ -47,14 +47,38 @@ final class FileTransferManager: ObservableObject {
     // MARK: - Connect / Disconnect
 
     /// Connect to device filesystem via pymobiledevice3 AFC (primary) or ifuse (fallback).
+    /// Verifies access by probing the root directory before declaring the mount successful.
     func mount(udid: String) async -> Bool {
-        // Primary: pymobiledevice3 AFC - stateless, no mount needed
+        lastError = nil
+        isLoading = true
+        defer { isLoading = false }
+
+        // Primary: pymobiledevice3 AFC - stateless, but probe root to confirm device access.
         if PyMobileDevice.available() {
+            let probe = await PyMobileDevice.afcListRaw(path: "/", udid: udid)
+            if !probe.succeeded {
+                let detail = probe.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                lastError = """
+                AFC access failed. Unlock the iPhone, tap 'Trust' if prompted, then retry.
+
+                Verify manually:
+                  pymobiledevice3 afc ls / --udid \(udid)
+                \(detail.isEmpty ? "" : "\nDetails: \(detail)")
+                """
+                deviceUDID = nil
+                isMounted = false
+                return false
+            }
+
+            let items = probe.entries
             deviceUDID = udid
             usesAFC = true
-            isMounted = true
             currentPath = "/"
-            await browse(path: "/")
+            entries = items
+                .filter { $0 != "." && $0 != ".." }
+                .map { FileEntry(name: $0, path: "/\($0)", isDirectory: true, size: 0, modified: nil) }
+                .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            isMounted = true
             return true
         }
 
@@ -80,7 +104,17 @@ final class FileTransferManager: ObservableObject {
             return true
         }
 
-        lastError = "Could not access device. Install pymobiledevice3: pip3 install pymobiledevice3"
+        let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        lastError = """
+        Could not access device filesystem.
+
+        Install pymobiledevice3:
+          pip3 install --upgrade pymobiledevice3
+
+        Or install the ifuse fallback:
+          brew install libimobiledevice ifuse
+        \(stderr.isEmpty ? "" : "\nifuse: \(stderr)")
+        """
         return false
     }
 

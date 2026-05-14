@@ -95,8 +95,16 @@ struct FileBrowserView: View {
             title: "Device Not Mounted",
             subtitle: "Connect to the device filesystem to browse and transfer files via AFC.",
             action: {
-                guard let udid = deviceVM.selectedDevice?.id else { return }
-                Task { let _ = await fileManager.mount(udid: udid) }
+                guard let udid = deviceVM.selectedDevice?.id else {
+                    fileManager.lastError = "No device selected. Connect an iPhone or iPad first."
+                    return
+                }
+                Task {
+                    let ok = await fileManager.mount(udid: udid)
+                    if !ok, fileManager.lastError == nil {
+                        fileManager.lastError = "Mount failed for an unknown reason."
+                    }
+                }
             },
             actionLabel: deviceVM.selectedDevice != nil ? "Mount Device" : nil
         )

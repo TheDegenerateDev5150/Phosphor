@@ -178,16 +178,18 @@ struct OnboardingView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("iOS 17+ Developer Tools (screen capture, location)")
                         .font(.system(size: 12, weight: .medium))
-                    Text("Requires a one-time tunnel service:")
+                    Text("Requires a one-time tunnel service. Run in Terminal (not from this app):")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
+                    let cmd = PyMobileDevice.tunneldCommand()
                     HStack {
-                        Text("sudo pymobiledevice3 remote tunneld")
+                        Text(cmd)
                             .font(.system(size: 11, design: .monospaced))
                             .textSelection(.enabled)
+                            .lineLimit(2)
                         Spacer()
                         Button {
-                            "sudo pymobiledevice3 remote tunneld".copyToClipboard()
+                            cmd.copyToClipboard()
                         } label: {
                             Image(systemName: "doc.on.doc")
                                 .font(.system(size: 10))
@@ -197,6 +199,9 @@ struct OnboardingView: View {
                     .padding(6)
                     .background(Color(.textBackgroundColor))
                     .clipShape(RoundedRectangle(cornerRadius: 4))
+                    Text("Tip: if 'sudo: pymobiledevice3: command not found' appears, sudo is not inheriting your PATH. Use the absolute path above.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
                 }
             }
             .padding(20)
