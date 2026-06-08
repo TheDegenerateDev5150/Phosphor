@@ -16,9 +16,11 @@ final class DeviceManager: ObservableObject {
     private var deviceInfoCache: [String: (device: DeviceInfo, fetchedAt: Date)] = [:]
     private var batteryInfoCache: [String: (info: [String: String], fetchedAt: Date)] = [:]
     private var pairStatusCache: [String: (isPaired: Bool, fetchedAt: Date)] = [:]
+    private var networkDeviceCache: (entries: [PyMobileDevice.DeviceEntry], fetchedAt: Date)?
     private let deviceInfoRefreshInterval: TimeInterval = 30
     private let batteryInfoRefreshInterval: TimeInterval = 60
     private let pairStatusRefreshInterval: TimeInterval = 120
+    private let networkDeviceRefreshInterval: TimeInterval = 30
 
     init() {
         checkDependencies()
@@ -58,17 +60,15 @@ final class DeviceManager: ObservableObject {
         lastError = nil
         defer { isScanning = false }
 
-        // Primary: pymobiledevice3 (with connection type)
+        // Primary: pymobiledevice3. Merge the standard usbmux snapshot with the
+        // network-only snapshot so devices already paired to this Mac over Wi-Fi
+        // can appear even when no USB cable is attached.
         var entries = await PyMobileDevice.listDevicesWithType()
+        entries = mergeDeviceEntries(entries + (await cachedNetworkDeviceEntries(forceRefresh: forceRefresh)))
 
-        // Fallback: libimobiledevice (assume USB)
+        // Fallback: libimobiledevice. Include both USB and network-only listings.
         if entries.isEmpty {
-            let result = await Shell.runAsync("idevice_id", arguments: ["-l"])
-            if result.succeeded {
-                entries = result.output.components(separatedBy: "\n")
-                    .filter { !$0.isEmpty }
-                    .map { PyMobileDevice.DeviceEntry(udid: $0, connectionType: "USB") }
-            }
+            entries = await listLibimobiledeviceEntries()
         }
 
         if entries.isEmpty {
@@ -77,6 +77,7 @@ final class DeviceManager: ObservableObject {
             deviceInfoCache.removeAll()
             batteryInfoCache.removeAll()
             pairStatusCache.removeAll()
+            networkDeviceCache = nil
             return
         }
 
@@ -110,6 +111,56 @@ final class DeviceManager: ObservableObject {
         } else {
             selectedDevice = devices.first
         }
+    }
+
+    private func cachedNetworkDeviceEntries(forceRefresh: Bool = false) async -> [PyMobileDevice.DeviceEntry] {
+        if !forceRefresh,
+           let cached = networkDeviceCache,
+           Date().timeIntervalSince(cached.fetchedAt) < networkDeviceRefreshInterval {
+            return cached.entries
+        }
+        let entries = await PyMobileDevice.listNetworkDeviceEntries()
+        networkDeviceCache = (entries, Date())
+        return entries
+    }
+
+    private func listLibimobiledeviceEntries() async -> [PyMobileDevice.DeviceEntry] {
+        async let usbResult = Shell.runAsync("idevice_id", arguments: ["-l"])
+        async let networkResult = Shell.runAsync("idevice_id", arguments: ["-n"])
+
+        var entries: [PyMobileDevice.DeviceEntry] = []
+        let usb = await usbResult
+        if usb.succeeded {
+            entries += parseLibimobiledeviceUDIDs(usb.output, connectionType: "USB")
+        }
+
+        let network = await networkResult
+        if network.succeeded {
+            entries += parseLibimobiledeviceUDIDs(network.output, connectionType: "Network")
+        }
+
+        return mergeDeviceEntries(entries)
+    }
+
+    private func parseLibimobiledeviceUDIDs(_ output: String, connectionType: String) -> [PyMobileDevice.DeviceEntry] {
+        output.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .map { PyMobileDevice.DeviceEntry(udid: $0, connectionType: connectionType) }
+    }
+
+    private func mergeDeviceEntries(_ entries: [PyMobileDevice.DeviceEntry]) -> [PyMobileDevice.DeviceEntry] {
+        var byUdid: [String: PyMobileDevice.DeviceEntry] = [:]
+        var orderedUdids: [String] = []
+
+        for entry in entries {
+            if byUdid[entry.udid] == nil { orderedUdids.append(entry.udid) }
+            if byUdid[entry.udid]?.connectionType != "USB" || entry.connectionType == "USB" {
+                byUdid[entry.udid] = entry
+            }
+        }
+
+        return orderedUdids.compactMap { byUdid[$0] }
     }
 
     private func cachedDevice(udid: String, connectionType: DeviceInfo.ConnectionType) -> DeviceInfo? {
@@ -190,13 +241,14 @@ final class DeviceManager: ObservableObject {
         }
 
         // Fallback: libimobiledevice
-        let result = await Shell.runAsync("ideviceinfo", arguments: ["-u", udid])
+        let networkArgs = connectionType == .wifi ? ["-n"] : []
+        let result = await Shell.runAsync("ideviceinfo", arguments: ["-u", udid] + networkArgs)
         guard result.succeeded else { return nil }
 
         let liInfo = result.output.parseKeyValuePairs()
-        let batteryResult = await Shell.runAsync("ideviceinfo", arguments: ["-u", udid, "-q", "com.apple.mobile.battery"])
+        let batteryResult = await Shell.runAsync("ideviceinfo", arguments: ["-u", udid] + networkArgs + ["-q", "com.apple.mobile.battery"])
         let batteryInfo = batteryResult.output.parseKeyValuePairs()
-        let diskResult = await Shell.runAsync("ideviceinfo", arguments: ["-u", udid, "-q", "com.apple.disk_usage"])
+        let diskResult = await Shell.runAsync("ideviceinfo", arguments: ["-u", udid] + networkArgs + ["-q", "com.apple.disk_usage"])
         let diskInfo = diskResult.output.parseKeyValuePairs()
         let isPaired = await cachedLibimobiledevicePairStatus(udid: udid, forceRefresh: forceRefresh)
 

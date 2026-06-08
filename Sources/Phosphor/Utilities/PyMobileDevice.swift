@@ -232,40 +232,54 @@ enum PyMobileDevice {
 
     /// List connected devices with connection type (USB vs Network/Wi-Fi).
     static func listDevicesWithType() async -> [DeviceEntry] {
-        let result = await runAsync(["usbmux", "list"])
-        guard result.succeeded else { return [] }
+        let result = await runAsync(["usbmux", "list", "--usb"])
+        guard result.succeeded else {
+            let fallback = await runAsync(["usbmux", "list"])
+            guard fallback.succeeded else { return [] }
+            return parseUsbmuxDeviceEntries(from: fallback.output, defaultConnectionType: "USB")
+        }
+        return parseUsbmuxDeviceEntries(from: result.output, defaultConnectionType: "USB")
+    }
 
-        let output = result.output
+    /// List devices currently reachable over network/Wi-Fi with connection metadata.
+    static func listNetworkDeviceEntries() async -> [DeviceEntry] {
+        let result = await runAsync(["usbmux", "list", "--network"], timeout: 10)
+        guard result.succeeded else { return [] }
+        return parseUsbmuxDeviceEntries(from: result.output, defaultConnectionType: "Network")
+    }
+
+    private static func parseUsbmuxDeviceEntries(
+        from output: String,
+        defaultConnectionType: String
+    ) -> [DeviceEntry] {
         if let data = output.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-            // Deduplicate: prefer USB over Network for same device
             var byUdid: [String: DeviceEntry] = [:]
+            var orderedUdids: [String] = []
+
             for entry in json {
                 guard let udid = entry["Identifier"] as? String
                         ?? entry["UniqueDeviceID"] as? String
                         ?? entry["SerialNumber"] as? String else { continue }
                 let connType = (entry["ConnectionType"] as? String)
                     ?? (entry["Properties"] as? [String: Any])?["ConnectionType"] as? String
-                    ?? "USB"
+                    ?? defaultConnectionType
                 let isUSB = connType.lowercased().contains("usb") || connType == "1"
                 let type = isUSB ? "USB" : "Network"
-                // USB takes priority over Network
-                if let existing = byUdid[udid] {
-                    if existing.connectionType != "USB" && type == "USB" {
-                        byUdid[udid] = DeviceEntry(udid: udid, connectionType: type)
-                    }
-                } else {
+
+                if byUdid[udid] == nil { orderedUdids.append(udid) }
+                if byUdid[udid]?.connectionType != "USB" || type == "USB" {
                     byUdid[udid] = DeviceEntry(udid: udid, connectionType: type)
                 }
             }
-            return Array(byUdid.values)
+
+            return orderedUdids.compactMap { byUdid[$0] }
         }
 
-        // Fallback: line-based, assume USB
         return output.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty && $0.count > 20 }
-            .map { DeviceEntry(udid: $0, connectionType: "USB") }
+            .map { DeviceEntry(udid: $0, connectionType: defaultConnectionType) }
     }
 
     // MARK: - Device Info
@@ -623,18 +637,7 @@ enum PyMobileDevice {
 
     /// List devices available over network.
     static func listNetworkDevices() async -> [String] {
-        let result = await runAsync(["usbmux", "list", "--network"], timeout: 10)
-        guard result.succeeded else { return [] }
-
-        let output = result.output
-        if let data = output.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-            return json.compactMap { $0["UniqueDeviceID"] as? String }
-        }
-
-        return output.components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && $0.count > 20 }
+        await listNetworkDeviceEntries().map(\.udid)
     }
 
     // MARK: - Diagnostics IORegistry
