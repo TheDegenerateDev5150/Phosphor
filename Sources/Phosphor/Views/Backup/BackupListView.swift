@@ -123,7 +123,7 @@ struct BackupListView: View {
             }
         } message: {
             if let backup = backupToDelete {
-                Text("This will permanently delete the backup of \(backup.deviceName) (\(backup.sizeString)). This cannot be undone.")
+                Text("This will permanently delete the backup of \(backup.deviceName) (\(backup.sizeResolved ? backup.sizeString : "size calculating")). This cannot be undone.")
             }
         }
         .alert("Backup", isPresented: $backupVM.showAlert) {
@@ -261,7 +261,11 @@ struct BackupRow: View {
                     Text(backup.dateString)
                     Text("(\(backup.relativeDate))")
                     Text("-")
-                    Text(backup.sizeString)
+                    if backup.sizeResolved {
+                        Text(backup.sizeString)
+                    } else {
+                        Label("Calculating...", systemImage: "clock")
+                    }
                     if backup.appCount > 0 {
                         Text("-")
                         Text("\(backup.appCount) apps")

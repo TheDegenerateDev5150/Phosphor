@@ -14,10 +14,6 @@ final class DeviceManager: ObservableObject {
 
     private var pollTimer: Timer?
 
-    init() {
-        checkDependencies()
-    }
-
     // MARK: - Dependency Check
 
     func checkDependencies() {

@@ -36,6 +36,7 @@ final class BackupManifest {
 
     let backupPath: String
     private let db: SQLiteReader
+    private var sizeCache: [String: Int] = [:]
 
     struct FileEntry: Identifiable, Hashable {
         let id: String // fileID (SHA-1 hash)
@@ -215,17 +216,44 @@ final class BackupManifest {
                 if i == components.count - 1 && entry.isFile {
                     current.files.append(entry)
                 } else {
-                    if let existing = current.children.first(where: { $0.name == component }) {
+                    if let existing = current.child(named: component) {
                         current = existing
                     } else {
                         let child = DirectoryNode(name: component, path: pathSoFar)
-                        current.children.append(child)
+                        current.addChild(child)
                         current = child
                     }
                 }
             }
         }
         return root
+    }
+
+    /// Resolve actual on-disk size for an entry on demand. Manifest browsing
+    /// queries intentionally do not stat every file up front because large iOS
+    /// backups can contain hundreds of thousands of files.
+    func fileSize(for entry: FileEntry) -> Int {
+        if let cached = sizeCache[entry.id] { return cached }
+        let diskPath = entry.diskPath(backupRoot: backupPath)
+        let size = (try? FileManager.default.attributesOfItem(atPath: diskPath)[.size] as? Int) ?? 0
+        sizeCache[entry.id] = size
+        return size
+    }
+
+    func resolvingSizes(for entries: [FileEntry]) -> [FileEntry] {
+        entries.map { entry in
+            FileEntry(
+                id: entry.id,
+                domain: entry.domain,
+                relativePath: entry.relativePath,
+                flags: entry.flags,
+                size: fileSize(for: entry)
+            )
+        }
+    }
+
+    func totalSize(for entries: [FileEntry]) -> Int {
+        entries.reduce(0) { $0 + fileSize(for: $1) }
     }
 
     /// Copy a file from the backup to a destination.
@@ -254,12 +282,10 @@ final class BackupManifest {
         }
         let flags = (row["flags"] as? Int) ?? 1
 
-        // Get actual file size from disk
-        let diskPath = FileEntry(id: fileID, domain: domain, relativePath: relativePath, flags: flags, size: 0)
-            .diskPath(backupRoot: backupPath)
-        let size = (try? FileManager.default.attributesOfItem(atPath: diskPath)[.size] as? Int) ?? 0
-
-        return FileEntry(id: fileID, domain: domain, relativePath: relativePath, flags: flags, size: size)
+        // Size is resolved lazily via fileSize(for:) when needed. Avoiding a
+        // filesystem stat here keeps manifest browsing and search responsive on
+        // large backups.
+        return FileEntry(id: fileID, domain: domain, relativePath: relativePath, flags: flags, size: 0)
     }
 }
 
@@ -270,6 +296,16 @@ final class DirectoryNode: Identifiable {
     let path: String
     var children: [DirectoryNode] = []
     var files: [BackupManifest.FileEntry] = []
+    private var childrenByName: [String: DirectoryNode] = [:]
+
+    func child(named name: String) -> DirectoryNode? {
+        childrenByName[name]
+    }
+
+    func addChild(_ child: DirectoryNode) {
+        children.append(child)
+        childrenByName[child.name] = child
+    }
 
     var totalItems: Int {
         files.count + children.reduce(0) { $0 + $1.totalItems }

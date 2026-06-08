@@ -206,7 +206,7 @@ final class BackupManager: ObservableObject {
         // points the picker at an individual backup rather than its parent.
         let rootInfoPlist = (dir as NSString).appendingPathComponent("Info.plist")
         if fm.fileExists(atPath: rootInfoPlist),
-           let single = BackupInfo.fromDirectory(dir) {
+           let single = BackupInfo.fromDirectory(dir, includeSize: false) {
             backups = [single]
             lastError = nil
             return
@@ -243,7 +243,7 @@ final class BackupManager: ObservableObject {
             let infoPlist = (fullPath as NSString).appendingPathComponent("Info.plist")
             guard fm.fileExists(atPath: infoPlist) else { continue }
 
-            if let backup = BackupInfo.fromDirectory(fullPath) {
+            if let backup = BackupInfo.fromDirectory(fullPath, includeSize: false) {
                 discovered.append(backup)
             }
         }

@@ -43,15 +43,15 @@ final class MusicTransferManager: ObservableObject {
             let manifest = try BackupManifest(backupPath: backupPath)
 
             let mediaFiles = try manifest.files(inDomain: "MediaDomain")
-            tracks = mediaFiles.filter { entry in
+            tracks = manifest.resolvingSizes(for: mediaFiles.filter { entry in
                 entry.isFile && entry.relativePath.contains("iTunes_Control/Music/") &&
                 ["mp3", "m4a", "aac", "wav", "aiff", "mp4"].contains(entry.fileExtension)
-            }.map { entry in
+            }).map { entry in
                 MusicTrack(id: entry.id, filename: entry.fileName, relativePath: entry.relativePath, size: entry.size, domain: entry.domain)
             }
 
             let ringtoneFiles = try manifest.files(matching: "%Ringtones%")
-            ringtones = ringtoneFiles.filter { $0.isFile && $0.fileExtension == "m4r" }.map { entry in
+            ringtones = manifest.resolvingSizes(for: ringtoneFiles.filter { $0.isFile && $0.fileExtension == "m4r" }).map { entry in
                 Ringtone(id: entry.id, filename: entry.fileName, relativePath: entry.relativePath, size: entry.size)
             }
         } catch {

@@ -131,7 +131,7 @@ final class AppleWatchExtractor {
             }
 
             let files = (try? manifest.files(inDomain: domain)) ?? []
-            let totalSize = files.reduce(UInt64(0)) { $0 + UInt64(max(0, $1.size)) }
+            let totalSize = UInt64(manifest.totalSize(for: files))
 
             // Derive display name from bundle ID
             let name = bundleId

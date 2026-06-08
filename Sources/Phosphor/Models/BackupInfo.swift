@@ -14,6 +14,7 @@ struct BackupInfo: Identifiable, Hashable {
     let isEncrypted: Bool
     let isFullBackup: Bool
     let size: UInt64
+    let sizeResolved: Bool
     let appCount: Int
 
     var modelName: String {
@@ -44,12 +45,14 @@ struct BackupInfo: Identifiable, Hashable {
     }
 
     /// Initialize from a backup directory by parsing its plists.
-    static func fromDirectory(_ path: String) -> BackupInfo? {
+    /// Size calculation recursively walks the whole backup and can be very slow
+    /// for large backups, so startup discovery can skip it and fill sizes later.
+    static func fromDirectory(_ path: String, includeSize: Bool = true) -> BackupInfo? {
         let dirName = (path as NSString).lastPathComponent
         guard let info = PlistParser.parseBackupInfo(path) else { return nil }
         let status = PlistParser.parseBackupStatus(path)
         let manifest = PlistParser.parseManifest(path)
-        let size = FileManager.default.directorySize(at: path)
+        let size = includeSize ? FileManager.default.directorySize(at: path) : 0
 
         return BackupInfo(
             id: dirName,
@@ -64,7 +67,27 @@ struct BackupInfo: Identifiable, Hashable {
             isEncrypted: manifest?.isEncrypted ?? info.isEncrypted,
             isFullBackup: status?.isFullBackup ?? false,
             size: size,
+            sizeResolved: includeSize,
             appCount: manifest?.applicationBundleIds.count ?? 0
+        )
+    }
+
+    func withSize(_ size: UInt64) -> BackupInfo {
+        BackupInfo(
+            id: id,
+            path: path,
+            deviceName: deviceName,
+            displayName: displayName,
+            productType: productType,
+            iosVersion: iosVersion,
+            serialNumber: serialNumber,
+            udid: udid,
+            lastBackupDate: lastBackupDate,
+            isEncrypted: isEncrypted,
+            isFullBackup: isFullBackup,
+            size: size,
+            sizeResolved: true,
+            appCount: appCount
         )
     }
 }

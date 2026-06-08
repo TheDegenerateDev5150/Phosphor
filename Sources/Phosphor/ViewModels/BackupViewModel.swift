@@ -22,11 +22,34 @@ final class BackupViewModel: ObservableObject {
 
     let backupManager = BackupManager()
     private var currentManifest: BackupManifest?
+    private var sizeResolutionTask: Task<Void, Never>?
 
     func loadBackups() {
+        sizeResolutionTask?.cancel()
         backupManager.discoverBackups()
         backups = backupManager.backups
         loadError = backupManager.lastError
+        resolveBackupSizesInBackground(for: backups)
+    }
+
+    private func resolveBackupSizesInBackground(for snapshot: [BackupInfo]) {
+        guard !snapshot.isEmpty else { return }
+        let snapshotIds = Set(snapshot.map(\.id))
+        sizeResolutionTask = Task.detached(priority: .utility) { [weak self] in
+            for backup in snapshot {
+                if Task.isCancelled { return }
+                let sized = backup.withSize(FileManager.default.directorySize(at: backup.path))
+                if Task.isCancelled { return }
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    let currentIds = Set(self.backups.map(\.id))
+                    guard currentIds == snapshotIds,
+                          let idx = self.backups.firstIndex(where: { $0.id == sized.id }) else { return }
+                    self.backups[idx] = sized
+                    self.backupManager.backups = self.backups
+                }
+            }
+        }
     }
 
     func openExistingBackupFolder() {
@@ -103,7 +126,7 @@ final class BackupViewModel: ObservableObject {
         currentDomain = domain
         guard let manifest = currentManifest else { return }
         do {
-            browserFiles = try manifest.files(inDomain: domain)
+            browserFiles = manifest.resolvingSizes(for: try manifest.files(inDomain: domain))
         } catch {
             alertMessage = error.localizedDescription
             showAlert = true
@@ -116,7 +139,7 @@ final class BackupViewModel: ObservableObject {
             return
         }
         do {
-            searchResults = try manifest.search(query)
+            searchResults = manifest.resolvingSizes(for: try manifest.search(query))
         } catch {
             searchResults = []
         }
@@ -144,6 +167,9 @@ final class BackupViewModel: ObservableObject {
     }
 
     var totalSize: String {
-        backupManager.totalBackupSize.formattedFileSize
+        if backups.contains(where: { !$0.sizeResolved }) {
+            return "calculating..."
+        }
+        return backupManager.totalBackupSize.formattedFileSize
     }
 }

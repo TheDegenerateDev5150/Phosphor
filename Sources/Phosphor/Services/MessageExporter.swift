@@ -18,6 +18,10 @@ final class MessageExporter {
     /// is_archived / is_filtered / is_blackholed filters that only exist on
     /// recent iOS versions.
     private let chatColumns: Set<String>
+    /// Columns present on `message`. Several hot paths need this to shape
+    /// SELECT lists for older iOS schemas; cache it once instead of running
+    /// PRAGMA table_info(message) for every chat load/search/export.
+    private let messageColumns: Set<String>
     /// Cached `chat_handle_join` -> handle id lookup, keyed by chat ROWID.
     private lazy var participantsByChat: [Int: [String]] = {
         (try? loadParticipantsByChat()) ?? [:]
@@ -29,6 +33,8 @@ final class MessageExporter {
         self.contacts = contacts
         let cols = (try? db.columns(for: "chat")) ?? []
         self.chatColumns = Set(cols.map { $0.name })
+        let messageCols = (try? db.columns(for: "message")) ?? []
+        self.messageColumns = Set(messageCols.map { $0.name })
     }
 
     /// Initialize from a backup directory by locating the sms.db.
@@ -73,7 +79,6 @@ final class MessageExporter {
         // Count only *user-visible* messages - i.e. excluding reaction-only
         // rows (associated_message_type in 2000..3999). Older sms.db schemas
         // pre-date that column, so we only apply the filter when it exists.
-        let messageColumns = (try? db.columns(for: "message"))?.map { $0.name } ?? []
         let reactionFilter = messageColumns.contains("associated_message_type")
             ? "AND COALESCE(m.associated_message_type, 0) NOT BETWEEN 2000 AND 3999"
             : ""
@@ -140,25 +145,8 @@ final class MessageExporter {
     /// Get all messages in a specific chat, with tapback reactions folded onto
     /// the message they target.
     func getMessages(chatId: Int) throws -> [Message] {
-        let columns = (try? db.columns(for: "message"))?.map { $0.name } ?? []
-        let columnSet = Set(columns)
-
-        // Optional columns: only include when present so we keep working with
-        // older sms.db schemas. Falling back via SELECT NULL would still parse,
-        // but querying unknown columns trips a prepare error.
-        var selectFields: [String] = [
-            "m.ROWID", "m.guid", "m.text", "m.date", "m.is_from_me",
-            "m.service", "m.cache_has_attachments", "m.is_read",
-            "COALESCE(h.id, '') as handle_id"
-        ]
-        for opt in ["associated_message_type", "associated_message_guid", "balloon_bundle_id", "payload_data"] {
-            if columnSet.contains(opt) {
-                selectFields.append("m.\(opt)")
-            }
-        }
-
         let sql = """
-            SELECT \(selectFields.joined(separator: ", "))
+            SELECT \(messageSelectFields())
             FROM message m
             JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
             LEFT JOIN handle h ON m.handle_id = h.ROWID
@@ -173,22 +161,8 @@ final class MessageExporter {
 
     /// Get all messages (across all chats).
     func getAllMessages(limit: Int = 10000) throws -> [Message] {
-        let columns = (try? db.columns(for: "message"))?.map { $0.name } ?? []
-        let columnSet = Set(columns)
-
-        var selectFields: [String] = [
-            "m.ROWID", "m.guid", "m.text", "m.date", "m.is_from_me",
-            "m.service", "m.cache_has_attachments", "m.is_read",
-            "COALESCE(h.id, '') as handle_id"
-        ]
-        for opt in ["associated_message_type", "associated_message_guid", "balloon_bundle_id", "payload_data"] {
-            if columnSet.contains(opt) {
-                selectFields.append("m.\(opt)")
-            }
-        }
-
         let sql = """
-            SELECT \(selectFields.joined(separator: ", "))
+            SELECT \(messageSelectFields())
             FROM message m
             LEFT JOIN handle h ON m.handle_id = h.ROWID
             ORDER BY m.date DESC
@@ -196,27 +170,14 @@ final class MessageExporter {
         """
 
         let rows = try db.query(sql)
-        return foldRows(rows, attachmentsByMessage: (try? attachmentsByMessage(chatId: nil)) ?? [:])
+        let attachmentsByMessage = (try? attachmentsByMessage(messageIds: messageIds(from: rows))) ?? [:]
+        return foldRows(rows, attachmentsByMessage: attachmentsByMessage)
     }
 
     /// Search messages by text content.
     func searchMessages(_ query: String, limit: Int = 500) throws -> [Message] {
-        let columns = (try? db.columns(for: "message"))?.map { $0.name } ?? []
-        let columnSet = Set(columns)
-
-        var selectFields: [String] = [
-            "m.ROWID", "m.guid", "m.text", "m.date", "m.is_from_me",
-            "m.service", "m.cache_has_attachments", "m.is_read",
-            "COALESCE(h.id, '') as handle_id"
-        ]
-        for opt in ["associated_message_type", "associated_message_guid", "balloon_bundle_id", "payload_data"] {
-            if columnSet.contains(opt) {
-                selectFields.append("m.\(opt)")
-            }
-        }
-
         let sql = """
-            SELECT \(selectFields.joined(separator: ", "))
+            SELECT \(messageSelectFields())
             FROM message m
             LEFT JOIN handle h ON m.handle_id = h.ROWID
             WHERE m.text LIKE ?
@@ -225,7 +186,29 @@ final class MessageExporter {
         """
 
         let rows = try db.query(sql, params: ["%\(query)%"])
-        return foldRows(rows, attachmentsByMessage: (try? attachmentsByMessage(chatId: nil)) ?? [:])
+        let attachmentsByMessage = (try? attachmentsByMessage(messageIds: messageIds(from: rows))) ?? [:]
+        return foldRows(rows, attachmentsByMessage: attachmentsByMessage)
+    }
+
+    private func messageIds(from rows: [[String: Any?]]) -> [Int] {
+        rows.compactMap { $0["ROWID"] as? Int }
+    }
+
+    /// Optional message columns differ across iOS versions. Build a compatible
+    /// SELECT list from the cached schema once per query without repeated PRAGMA
+    /// calls on every chat/export operation.
+    private func messageSelectFields() -> String {
+        var fields: [String] = [
+            "m.ROWID", "m.guid", "m.text", "m.date", "m.is_from_me",
+            "m.service", "m.cache_has_attachments", "m.is_read",
+            "COALESCE(h.id, '') as handle_id"
+        ]
+        for opt in ["associated_message_type", "associated_message_guid", "balloon_bundle_id", "payload_data"] {
+            if messageColumns.contains(opt) {
+                fields.append("m.\(opt)")
+            }
+        }
+        return fields.joined(separator: ", ")
     }
 
     // MARK: - Reaction / attachment folding
@@ -332,7 +315,10 @@ final class MessageExporter {
             params = []
         }
 
-        let rows = try db.query(sql, params: params)
+        return try parseAttachmentsByMessageRows(db.query(sql, params: params))
+    }
+
+    private func parseAttachmentsByMessageRows(_ rows: [[String: Any?]]) -> [Int: [MessageAttachment]] {
         var out: [Int: [MessageAttachment]] = [:]
         for row in rows {
             guard let msgId = row["message_id"] as? Int,
@@ -346,6 +332,34 @@ final class MessageExporter {
                 totalBytes: (row["total_bytes"] as? Int) ?? 0
             )
             out[msgId, default: []].append(att)
+        }
+        return out
+    }
+
+
+    /// Load attachments only for the messages already returned by a limited
+    /// query/search. The previous all-messages path loaded every attachment in
+    /// sms.db even when the UI only asked for the latest 500/10,000 messages.
+    private func attachmentsByMessage(messageIds: [Int]) throws -> [Int: [MessageAttachment]] {
+        guard !messageIds.isEmpty else { return [:] }
+        var out: [Int: [MessageAttachment]] = [:]
+        for chunkStart in stride(from: 0, to: messageIds.count, by: 500) {
+            let chunk = Array(messageIds[chunkStart..<min(chunkStart + 500, messageIds.count)])
+            let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+            let sql = """
+                SELECT
+                    maj.message_id, a.ROWID, a.guid, a.filename, a.mime_type,
+                    a.transfer_name, a.total_bytes
+                FROM attachment a
+                JOIN message_attachment_join maj ON maj.attachment_id = a.ROWID
+                WHERE maj.message_id IN (\(placeholders))
+            """
+            let partial = try parseAttachmentsByMessageRows(
+                db.query(sql, params: chunk.map(String.init))
+            )
+            for (messageId, attachments) in partial {
+                out[messageId, default: []].append(contentsOf: attachments)
+            }
         }
         return out
     }
@@ -461,16 +475,38 @@ final class MessageExporter {
                 .prefix(50)
             let filename = "\(safeName).\(format.fileExtension)"
             let path = (directory as NSString).appendingPathComponent(String(filename))
-            try exportChat(chatId: chat.id, format: format, to: path)
+            let messages = try getMessages(chatId: chat.id)
+            try exportMessages(messages, chatTitle: chat.title, format: format, to: path)
             count += 1
         }
         return count
     }
 
+    private func exportMessages(_ messages: [Message],
+                                chatTitle: String,
+                                format: MessageExportFormat,
+                                to path: String) throws {
+        switch format {
+        case .csv:
+            try exportCSV(messages: messages, chatTitle: chatTitle, to: path)
+        case .txt:
+            try exportPlainText(messages: messages, chatTitle: chatTitle, to: path)
+        case .html:
+            try exportHTML(messages: messages, chatTitle: chatTitle, to: path)
+        case .json:
+            try exportJSON(messages: messages, chatTitle: chatTitle, to: path)
+        case .mbox:
+            try exportMbox(messages: messages, chatTitle: chatTitle, to: path)
+        }
+    }
+
     // MARK: - Private Export Implementations
 
     private func exportCSV(messages: [Message], chatTitle: String, to path: String) throws {
-        var csv = "Date,Sender,Text,Reactions,Service\n"
+        var lines: [String] = []
+        lines.reserveCapacity(messages.count + 1)
+        lines.append("Date,Sender,Text,Reactions,Service")
+
         for msg in messages {
             let text = (msg.text ?? "")
                 .replacingOccurrences(of: "\"", with: "\"\"")
@@ -478,25 +514,31 @@ final class MessageExporter {
             let reactions = msg.reactions
                 .map { "\($0.sender): \($0.type.label)" }
                 .joined(separator: "; ")
-            csv += "\"\(msg.formattedDate)\",\"\(msg.senderLabel)\",\"\(text)\",\"\(reactions)\",\"\(msg.service)\"\n"
+            lines.append("\"\(msg.formattedDate)\",\"\(msg.senderLabel)\",\"\(text)\",\"\(reactions)\",\"\(msg.service)\"")
         }
+
+        let csv = lines.joined(separator: "\n") + "\n"
         try csv.write(toFile: path, atomically: true, encoding: .utf8)
     }
 
     private func exportPlainText(messages: [Message], chatTitle: String, to path: String) throws {
-        var lines = "Conversation: \(chatTitle)\n"
-        lines += "Exported by Phosphor\n"
-        lines += String(repeating: "-", count: 60) + "\n\n"
+        var lines: [String] = []
+        lines.reserveCapacity(messages.count * 4 + 4)
+        lines.append("Conversation: \(chatTitle)")
+        lines.append("Exported by Phosphor")
+        lines.append(String(repeating: "-", count: 60))
+        lines.append("")
 
         for msg in messages {
-            lines += "[\(msg.formattedDate)] \(msg.senderLabel):\n"
-            lines += "\(msg.displayText)\n"
+            lines.append("[\(msg.formattedDate)] \(msg.senderLabel):")
+            lines.append(msg.displayText)
             for reaction in msg.reactions {
-                lines += "   \(reaction.type.emoji) \(reaction.sender)\n"
+                lines.append("   \(reaction.type.emoji) \(reaction.sender)")
             }
-            lines += "\n"
+            lines.append("")
         }
-        try lines.write(toFile: path, atomically: true, encoding: .utf8)
+
+        try (lines.joined(separator: "\n") + "\n").write(toFile: path, atomically: true, encoding: .utf8)
     }
 
     /// Copy referenced attachments into a sibling `<export>_attachments` folder so the
@@ -551,8 +593,22 @@ final class MessageExporter {
 
     private func exportHTML(messages: [Message], chatTitle: String, to path: String) throws {
         let attachmentMap = stageAttachments(messages: messages, htmlPath: path)
+        let outputURL = URL(fileURLWithPath: path)
+        try? FileManager.default.removeItem(at: outputURL)
+        FileManager.default.createFile(atPath: path, contents: nil)
+        let handle = try FileHandle(forWritingTo: outputURL)
+        defer { try? handle.close() }
+        var writeError: Error?
+        func append(_ chunk: String) {
+            guard writeError == nil, let data = chunk.data(using: .utf8) else { return }
+            do {
+                try handle.write(contentsOf: data)
+            } catch {
+                writeError = error
+            }
+        }
 
-        var html = """
+        append("""
         <!DOCTYPE html>
         <html lang="en">
         <head>
@@ -590,7 +646,7 @@ final class MessageExporter {
         <body>
         <h1>\(htmlEscape(chatTitle))</h1>
         <p class="meta">Exported by Phosphor &middot; \(Date().shortString)</p>
-        """
+        """)
 
         var lastDateStr = ""
         var lastSender = ""
@@ -598,13 +654,13 @@ final class MessageExporter {
         for msg in messages {
             let dateStr = msg.formattedDate
             if dateStr != lastDateStr {
-                html += "<div class=\"time\">\(htmlEscape(dateStr))</div>\n"
+                append("<div class=\"time\">\(htmlEscape(dateStr))</div>\n")
                 lastDateStr = dateStr
             }
 
             let sender = msg.senderLabel
             if sender != lastSender && !msg.isFromMe {
-                html += "<div class=\"sender\">\(htmlEscape(sender))</div>\n"
+                append("<div class=\"sender\">\(htmlEscape(sender))</div>\n")
                 lastSender = sender
             }
 
@@ -655,13 +711,12 @@ final class MessageExporter {
                 reactionHTML = "<span class=\"reactions\" title=\"\(htmlEscape(msg.reactions.map { "\($0.sender) \($0.type.label.lowercased())" }.joined(separator: ", ")))\">\(glyphs)</span>"
             }
 
-            html += "<div class=\"msg-row \(cssClass)\"><div class=\"bubble \(bubbleClass)\">\(bubbleHTML)\(reactionHTML)</div></div>\n"
+            append("<div class=\"msg-row \(cssClass)\"><div class=\"bubble \(bubbleClass)\">\(bubbleHTML)\(reactionHTML)</div></div>\n")
         }
 
-        html += "</body></html>"
-        try html.write(toFile: path, atomically: true, encoding: .utf8)
+        append("</body></html>")
+        if let writeError { throw writeError }
     }
-
     /// Export messages as RFC 4155 mbox (mboxo). Each message becomes a separate
     /// RFC 5322 envelope so Mail.app, Thunderbird, mutt, etc. can import the
     /// conversation as a mail folder. Attachments are embedded as base64 MIME parts
@@ -669,7 +724,20 @@ final class MessageExporter {
     private func exportMbox(messages: [Message], chatTitle: String, to path: String) throws {
         let crlf = "\r\n"
         let userDomain = "phosphor.local"
-        var out = ""
+        let outputURL = URL(fileURLWithPath: path)
+        try? FileManager.default.removeItem(at: outputURL)
+        FileManager.default.createFile(atPath: path, contents: nil)
+        let handle = try FileHandle(forWritingTo: outputURL)
+        defer { try? handle.close() }
+        var writeError: Error?
+        func append(_ chunk: String) {
+            guard writeError == nil, let data = chunk.data(using: .utf8) else { return }
+            do {
+                try handle.write(contentsOf: data)
+            } catch {
+                writeError = error
+            }
+        }
 
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "EEE MMM d HH:mm:ss yyyy"
@@ -686,7 +754,7 @@ final class MessageExporter {
             let envelopeAddr = mboxAddress(envelopeFrom, domain: userDomain)
 
             // mboxo: ">From " escape protects the From-line delimiter.
-            out += "From \(envelopeAddr) \(envelopeDate)\(crlf)"
+            append("From \(envelopeAddr) \(envelopeDate)\(crlf)")
 
             let fromDisplay = msg.isFromMe ? "Me" : msg.senderLabel
             let fromHeader = msg.isFromMe
@@ -696,17 +764,17 @@ final class MessageExporter {
                 ? "\(headerEncode(chatTitle)) <\(mboxAddress(chatTitle, domain: userDomain))>"
                 : "Me <me@\(userDomain)>"
 
-            out += "From: \(fromHeader)\(crlf)"
-            out += "To: \(toHeader)\(crlf)"
-            out += "Date: \(rfc5322Formatter.string(from: msg.date))\(crlf)"
-            out += "Subject: \(headerEncode(chatTitle))\(crlf)"
-            out += "Message-ID: <\(msg.guid)@\(userDomain)>\(crlf)"
-            out += "X-Phosphor-Service: \(msg.service)\(crlf)"
+            append("From: \(fromHeader)\(crlf)")
+            append("To: \(toHeader)\(crlf)")
+            append("Date: \(rfc5322Formatter.string(from: msg.date))\(crlf)")
+            append("Subject: \(headerEncode(chatTitle))\(crlf)")
+            append("Message-ID: <\(msg.guid)@\(userDomain)>\(crlf)")
+            append("X-Phosphor-Service: \(msg.service)\(crlf)")
             if !msg.reactions.isEmpty {
                 let summary = msg.reactions.map { "\($0.sender):\($0.type.label)" }.joined(separator: ", ")
-                out += "X-Phosphor-Reactions: \(headerEncode(summary))\(crlf)"
+                append("X-Phosphor-Reactions: \(headerEncode(summary))\(crlf)")
             }
-            out += "MIME-Version: 1.0\(crlf)"
+            append("MIME-Version: 1.0\(crlf)")
 
             let body = msg.text ?? ""
             // Pick the first non-payload attachment as the MIME body when present.
@@ -717,24 +785,24 @@ final class MessageExporter {
                let attachmentDiskPath,
                let data = try? Data(contentsOf: URL(fileURLWithPath: attachmentDiskPath)) {
                 let boundary = "----=_Phosphor_\(msg.guid)"
-                out += "Content-Type: multipart/mixed; boundary=\"\(boundary)\"\(crlf)\(crlf)"
+                append("Content-Type: multipart/mixed; boundary=\"\(boundary)\"\(crlf)\(crlf)")
 
-                out += "--\(boundary)\(crlf)"
-                out += "Content-Type: text/plain; charset=UTF-8\(crlf)"
-                out += "Content-Transfer-Encoding: 8bit\(crlf)\(crlf)"
-                out += mboxEscape(body.isEmpty ? "[Attachment]" : body) + crlf + crlf
+                append("--\(boundary)\(crlf)")
+                append("Content-Type: text/plain; charset=UTF-8\(crlf)")
+                append("Content-Transfer-Encoding: 8bit\(crlf)\(crlf)")
+                append(mboxEscape(body.isEmpty ? "[Attachment]" : body) + crlf + crlf)
 
                 let name = payloadAttachment.filename.map { ($0 as NSString).lastPathComponent } ?? payloadAttachment.displayName
                 let mime = payloadAttachment.mimeType ?? "application/octet-stream"
-                out += "--\(boundary)\(crlf)"
-                out += "Content-Type: \(mime); name=\"\(headerEncode(name))\"\(crlf)"
-                out += "Content-Disposition: attachment; filename=\"\(headerEncode(name))\"\(crlf)"
-                out += "Content-Transfer-Encoding: base64\(crlf)\(crlf)"
-                out += data.base64EncodedString(options: [.lineLength76Characters, .endLineWithCarriageReturn, .endLineWithLineFeed])
-                out += crlf + "--\(boundary)--\(crlf)\(crlf)"
+                append("--\(boundary)\(crlf)")
+                append("Content-Type: \(mime); name=\"\(headerEncode(name))\"\(crlf)")
+                append("Content-Disposition: attachment; filename=\"\(headerEncode(name))\"\(crlf)")
+                append("Content-Transfer-Encoding: base64\(crlf)\(crlf)")
+                append(data.base64EncodedString(options: [.lineLength76Characters, .endLineWithCarriageReturn, .endLineWithLineFeed]))
+                append(crlf + "--\(boundary)--\(crlf)\(crlf)")
             } else {
-                out += "Content-Type: text/plain; charset=UTF-8\(crlf)"
-                out += "Content-Transfer-Encoding: 8bit\(crlf)\(crlf)"
+                append("Content-Type: text/plain; charset=UTF-8\(crlf)")
+                append("Content-Transfer-Encoding: 8bit\(crlf)\(crlf)")
                 var bodyOut = body
                 let inlineAttachments = msg.attachments.filter { !$0.isPluginPayload }
                 if !inlineAttachments.isEmpty {
@@ -747,11 +815,11 @@ final class MessageExporter {
                     bodyOut += "[Link: \(link)]"
                 }
                 if bodyOut.isEmpty { bodyOut = msg.displayText }
-                out += mboxEscape(bodyOut) + crlf + crlf
+                append(mboxEscape(bodyOut) + crlf + crlf)
             }
         }
 
-        try out.write(toFile: path, atomically: true, encoding: .utf8)
+        if let writeError { throw writeError }
     }
 
     /// Mbox bodies must escape lines that start with `From ` so the delimiter remains unambiguous.
@@ -788,7 +856,27 @@ final class MessageExporter {
     }
 
     private func exportJSON(messages: [Message], chatTitle: String, to path: String) throws {
-        let entries: [[String: Any]] = messages.map { msg in
+        let outputURL = URL(fileURLWithPath: path)
+        try? FileManager.default.removeItem(at: outputURL)
+        FileManager.default.createFile(atPath: path, contents: nil)
+        let handle = try FileHandle(forWritingTo: outputURL)
+        defer { try? handle.close() }
+        func append(_ chunk: String) throws {
+            if let data = chunk.data(using: .utf8) {
+                try handle.write(contentsOf: data)
+            }
+        }
+
+        try append("""
+        {
+          "chat": \(try jsonLiteral(chatTitle)),
+          "exported_at": \(try jsonLiteral(Date().iso8601String)),
+          "exported_by": "Phosphor",
+          "message_count": \(messages.count),
+          "messages": [
+        """)
+
+        for (index, msg) in messages.enumerated() {
             var entry: [String: Any] = [
                 "id": msg.id,
                 "guid": msg.guid,
@@ -810,19 +898,26 @@ final class MessageExporter {
                 "reactions": msg.reactions.map { ["sender": $0.sender, "type": $0.type.label, "emoji": $0.type.emoji] }
             ]
             if let link = msg.linkURL { entry["link_url"] = link }
-            return entry
+            if index > 0 { try append(",\n") }
+            try append("    " + jsonObjectString(entry))
         }
 
-        let root: [String: Any] = [
-            "chat": chatTitle,
-            "exported_at": Date().iso8601String,
-            "exported_by": "Phosphor",
-            "message_count": messages.count,
-            "messages": entries
-        ]
+        try append("""
 
-        let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: URL(fileURLWithPath: path))
+          ]
+        }
+        """)
+    }
+
+    private func jsonLiteral(_ string: String) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: [string], options: [])
+        let array = String(data: data, encoding: .utf8) ?? "[\"\"]"
+        return String(array.dropFirst().dropLast())
+    }
+
+    private func jsonObjectString(_ object: [String: Any]) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        return String(data: data, encoding: .utf8) ?? "{}"
     }
 
     // MARK: - Private Helpers
@@ -877,9 +972,13 @@ final class MessageExporter {
         )
     }
 
-    /// First http(s) URL inside a string, using `NSDataDetector`.
+    /// First http(s) URL inside a string, using a cached `NSDataDetector`.
+    /// Creating detectors is relatively expensive and this method runs once per
+    /// message while building message lists/exports.
+    private static let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
     static func firstURL(in text: String) -> String? {
-        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
+        guard let detector = linkDetector else {
             return nil
         }
         let range = NSRange(text.startIndex..., in: text)

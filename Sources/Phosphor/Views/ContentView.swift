@@ -32,7 +32,8 @@ struct ContentView: View {
             }
         }
         .task {
-            // Check tunnel status on launch and periodically
+            // Defer process probing until after first paint.
+            try? await Task.sleep(for: .milliseconds(750))
             await checkTunnel()
         }
     }

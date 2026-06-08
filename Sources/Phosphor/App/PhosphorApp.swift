@@ -22,9 +22,14 @@ struct PhosphorApp: App {
                 .environmentObject(backupVM)
                 .frame(minWidth: 960, minHeight: 640)
                 .onAppear {
-                    deviceVM.deviceManager.startPolling(interval: 4.0)
-                    backupVM.loadBackups()
-                    scheduler.startMonitoring()
+                    Task {
+                        // Let SwiftUI paint the first window before starting
+                        // device polling and backup discovery work.
+                        try? await Task.sleep(for: .milliseconds(750))
+                        deviceVM.deviceManager.startPolling(interval: 4.0)
+                        backupVM.loadBackups()
+                        scheduler.startMonitoring()
+                    }
                 }
                 .sheet(isPresented: showOnboarding) {
                     OnboardingView(isPresented: showOnboarding)

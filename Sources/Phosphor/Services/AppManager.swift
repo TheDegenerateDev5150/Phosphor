@@ -110,7 +110,7 @@ final class AppManager: ObservableObject {
                 var dataSize: UInt64 = 0
                 if hasData {
                     let files = try backupManifest.files(inDomain: appDomain)
-                    dataSize = UInt64(files.reduce(0) { $0 + $1.size })
+                    dataSize = UInt64(backupManifest.totalSize(for: files))
                 }
 
                 apps.append(AppBundle(

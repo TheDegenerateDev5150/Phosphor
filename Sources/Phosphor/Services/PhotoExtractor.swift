@@ -16,7 +16,7 @@ final class PhotoExtractor: ObservableObject {
 
         do {
             let manifest = try BackupManifest(backupPath: backupPath)
-            let photos = try manifest.cameraRollPhotos()
+            let photos = manifest.resolvingSizes(for: try manifest.cameraRollPhotos())
 
             mediaItems = photos.map { entry in
                 MediaItem(
