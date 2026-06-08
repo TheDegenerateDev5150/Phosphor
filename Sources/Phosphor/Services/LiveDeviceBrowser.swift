@@ -14,6 +14,7 @@ final class LiveDeviceBrowser: ObservableObject {
 
     private var deviceUDID: String?
     private var usesAFC = false
+    private var cachedDCIMFolders: [String] = []
 
     struct LivePhoto: Identifiable, Hashable {
         let id: String
@@ -53,22 +54,20 @@ final class LiveDeviceBrowser: ObservableObject {
                 usesAFC = true
                 isMounted = true
 
-                // Count photos across DCIM subfolders
-                var count = 0
-                for subfolder in dcimContents {
-                    guard !subfolder.isEmpty, subfolder != ".", subfolder != ".." else { continue }
-                    let subFiles = await PyMobileDevice.afcList(path: "/DCIM/\(subfolder)", udid: udid)
-                    count += subFiles.filter { name in
-                        let ext = (name as NSString).pathExtension.lowercased()
-                        return ["jpg", "jpeg", "heic", "heif", "png", "gif", "mov", "mp4", "m4v"].contains(ext)
-                    }.count
-                }
-                photoCount = count
+                cachedDCIMFolders = dcimContents
+                    .filter { !$0.isEmpty && $0 != "." && $0 != ".." }
+                    .sorted()
+                photoCount = 0
                 return true
             }
         }
 
-        // Fallback: ifuse mount
+        guard Shell.which("ifuse") != nil else {
+            lastError = "Could not access device photos. Install or repair pymobiledevice3 with: pipx install pymobiledevice3"
+            return false
+        }
+
+        // Optional legacy fallback: ifuse mount
         let tmpDir = NSTemporaryDirectory() + "phosphor-live-\(udid.prefix(8))"
         let fm = FileManager.default
         try? fm.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
@@ -81,7 +80,7 @@ final class LiveDeviceBrowser: ObservableObject {
             return true
         }
 
-        lastError = "Could not access device. Install pymobiledevice3: pip3 install pymobiledevice3"
+        lastError = "Could not access device. Install pymobiledevice3: pipx install pymobiledevice3"
         return false
     }
 
@@ -94,6 +93,7 @@ final class LiveDeviceBrowser: ObservableObject {
         deviceUDID = nil
         isMounted = false
         usesAFC = false
+        cachedDCIMFolders = []
         photos = []
         photoCount = 0
     }
@@ -121,10 +121,12 @@ final class LiveDeviceBrowser: ObservableObject {
         let photoExtensions = Set(["jpg", "jpeg", "heic", "heif", "png", "gif", "webp",
                                     "mov", "mp4", "m4v", "3gp"])
 
-        let dcimContents = await PyMobileDevice.afcList(path: "/DCIM", udid: udid)
+        let dcimContents = cachedDCIMFolders.isEmpty
+            ? await PyMobileDevice.afcList(path: "/DCIM", udid: udid).sorted()
+            : cachedDCIMFolders
         var found: [LivePhoto] = []
 
-        for subfolder in dcimContents.sorted() {
+        for subfolder in dcimContents {
             guard !subfolder.isEmpty else { continue }
 
             // Just list files - don't download them yet
