@@ -39,8 +39,6 @@ struct PhosphorApp: App {
         .windowToolbarStyle(.unified(showsTitle: true))
         .defaultSize(width: 1100, height: 720)
         .commands {
-            CommandGroup(replacing: .newItem) {}
-
             CommandMenu("Device") {
                 Button("Refresh Devices") {
                     Task { await deviceVM.refresh() }
