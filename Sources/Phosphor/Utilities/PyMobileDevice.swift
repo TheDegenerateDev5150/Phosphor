@@ -231,14 +231,33 @@ enum PyMobileDevice {
     }
 
     /// List connected devices with connection type (USB vs Network/Wi-Fi).
+    ///
+    /// Query USB and network explicitly before merging. Some pymobiledevice3
+    /// versions either omit Wi-Fi devices from the default usbmux snapshot or
+    /// omit ConnectionType there, which can make paired Wi-Fi devices disappear
+    /// or be misclassified as USB.
     static func listDevicesWithType() async -> [DeviceEntry] {
-        let result = await runAsync(["usbmux", "list", "--usb"])
-        guard result.succeeded else {
+        async let usbResult = runAsync(["usbmux", "list", "--usb"])
+        async let networkResult = runAsync(["usbmux", "list", "--network"], timeout: 10)
+
+        var entries: [DeviceEntry] = []
+        let usb = await usbResult
+        if usb.succeeded {
+            entries += parseUsbmuxDeviceEntries(from: usb.output, defaultConnectionType: "USB")
+        }
+
+        let network = await networkResult
+        if network.succeeded {
+            entries += parseUsbmuxDeviceEntries(from: network.output, defaultConnectionType: "Network")
+        }
+
+        if entries.isEmpty {
             let fallback = await runAsync(["usbmux", "list"])
             guard fallback.succeeded else { return [] }
-            return parseUsbmuxDeviceEntries(from: fallback.output, defaultConnectionType: "USB")
+            entries = parseUsbmuxDeviceEntries(from: fallback.output, defaultConnectionType: "USB")
         }
-        return parseUsbmuxDeviceEntries(from: result.output, defaultConnectionType: "USB")
+
+        return mergeDeviceEntries(entries)
     }
 
     /// List devices currently reachable over network/Wi-Fi with connection metadata.
@@ -280,6 +299,22 @@ enum PyMobileDevice {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty && $0.count > 20 }
             .map { DeviceEntry(udid: $0, connectionType: defaultConnectionType) }
+    }
+
+    private static func mergeDeviceEntries(_ entries: [DeviceEntry]) -> [DeviceEntry] {
+        var byUdid: [String: DeviceEntry] = [:]
+        var orderedUdids: [String] = []
+
+        for entry in entries {
+            if byUdid[entry.udid] == nil { orderedUdids.append(entry.udid) }
+            // Prefer USB when both transports are currently present; otherwise
+            // preserve Network so Wi-Fi-only backup paths can identify it.
+            if byUdid[entry.udid]?.connectionType != "USB" || entry.connectionType == "USB" {
+                byUdid[entry.udid] = entry
+            }
+        }
+
+        return orderedUdids.compactMap { byUdid[$0] }
     }
 
     // MARK: - Device Info

@@ -268,6 +268,7 @@ final class BackupManager: ObservableObject {
     func createBackup(
         udid: String,
         encrypted: Bool = false,
+        preferNetwork: Bool = false,
         onProgress: @escaping (String) -> Void
     ) async -> Bool {
         isCreatingBackup = true
@@ -302,7 +303,7 @@ final class BackupManager: ObservableObject {
         backupProgress = "Trying idevicebackup2..."
         onProgress("Falling back to idevicebackup2...")
 
-        let args = ["backup", "--full", "-u", udid, Self.activeBackupDir]
+        let args = idevicebackupArguments(udid: udid, full: true, preferNetwork: preferNetwork)
         var idevicebackupStderr = ""
 
         return await withCheckedContinuation { continuation in
@@ -346,6 +347,15 @@ final class BackupManager: ObservableObject {
                 }
             )
         }
+    }
+
+    private func idevicebackupArguments(udid: String, full: Bool, preferNetwork: Bool) -> [String] {
+        var args = ["-u", udid]
+        if preferNetwork { args.append("-n") }
+        args.append("backup")
+        if full { args.append("--full") }
+        args.append(Self.activeBackupDir)
+        return args
     }
 
     /// Backup using pymobiledevice3.
@@ -407,6 +417,7 @@ final class BackupManager: ObservableObject {
     /// Create an incremental backup (only changed files).
     func createIncrementalBackup(
         udid: String,
+        preferNetwork: Bool = false,
         onProgress: @escaping (String) -> Void
     ) async -> Bool {
         isCreatingBackup = true
@@ -442,7 +453,7 @@ final class BackupManager: ObservableObject {
         return await withCheckedContinuation { continuation in
             Shell.runStreaming(
                 "idevicebackup2",
-                arguments: ["backup", "-u", udid, Self.activeBackupDir],
+                arguments: idevicebackupArguments(udid: udid, full: false, preferNetwork: preferNetwork),
                 onOutput: { [weak self] output in
                     let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
                     self?.backupProgress = trimmed
