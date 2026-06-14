@@ -1,5 +1,95 @@
 import Foundation
 import SwiftUI
+import AppKit
+
+enum MessageDateFilter: String, CaseIterable, Identifiable {
+    case all = "All Dates"
+    case last30Days = "Last 30 Days"
+    case thisYear = "This Year"
+    case custom = "Custom Range"
+
+    var id: String { rawValue }
+
+    func range(customStart: Date, customEnd: Date) -> (start: Date?, end: Date?) {
+        let calendar = Calendar.current
+        switch self {
+        case .all:
+            return (nil, nil)
+        case .last30Days:
+            return (calendar.date(byAdding: .day, value: -30, to: Date()), nil)
+        case .thisYear:
+            return (calendar.date(from: calendar.dateComponents([.year], from: Date())), nil)
+        case .custom:
+            let start = calendar.startOfDay(for: min(customStart, customEnd))
+            let endBase = calendar.startOfDay(for: max(customStart, customEnd))
+            let end = calendar.date(byAdding: DateComponents(day: 1, second: -1), to: endBase) ?? endBase
+            return (start, end)
+        }
+    }
+
+    var startDate: Date? { range(customStart: Date(), customEnd: Date()).start }
+}
+
+
+enum MessageBackupReadiness: Equatable {
+    case unknown
+    case ready
+    case noMessagesDatabase
+    case encryptedBackup
+    case permissionDenied(String)
+    case emptyDatabase
+    case unsupportedSchema(String)
+    case loadError(String)
+
+    var title: String {
+        switch self {
+        case .unknown, .ready: return "No Messages Found"
+        case .noMessagesDatabase: return "Messages Database Missing"
+        case .encryptedBackup: return "Encrypted Backup"
+        case .permissionDenied: return "Permission Needed"
+        case .emptyDatabase: return "No Messages in Backup"
+        case .unsupportedSchema: return "Unsupported Messages Database"
+        case .loadError: return "Could Not Load Messages"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .unknown:
+            return "Choose a backup to check for messages."
+        case .ready:
+            return "The messages database was found, but no visible conversations were available. The backup may only contain deleted, archived, or filtered conversations."
+        case .noMessagesDatabase:
+            return "This backup does not contain HomeDomain/Library/SMS/sms.db. Choose another backup or create a fresh local backup that includes Messages."
+        case .encryptedBackup:
+            return "This backup is encrypted, so Messages may be unavailable until the backup is unlocked or exported in a readable form. Choose an unencrypted/readable backup or unlock it first."
+        case .permissionDenied(let detail):
+            return "Phosphor cannot read the Messages database or backup folder. Grant Files and Folders access, move the backup to a readable location, or choose another backup.\(detail.isEmpty ? "" : " Detail: \(detail)")"
+        case .emptyDatabase:
+            return "The Messages database is readable, but it contains no message rows. This can happen with a partial backup or a device with no local Messages history."
+        case .unsupportedSchema(let detail):
+            return "The backup contains a Messages database, but its schema is not one Phosphor understands yet.\(detail.isEmpty ? "" : " Detail: \(detail)")"
+        case .loadError(let detail):
+            return "Phosphor found the backup but hit an error while reading Messages.\(detail.isEmpty ? "" : " Detail: \(detail)")"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .permissionDenied: return "lock.shield"
+        case .encryptedBackup: return "lock.fill"
+        case .unsupportedSchema: return "exclamationmark.triangle"
+        case .loadError: return "xmark.octagon"
+        default: return "message"
+        }
+    }
+}
+
+struct MessageExportResult: Identifiable {
+    let id = UUID()
+    let url: URL
+    let summary: String
+}
 
 /// Drives message browsing and export UI.
 @MainActor
@@ -13,16 +103,33 @@ final class MessageViewModel: ObservableObject {
     @Published var searchResults: [Message] = []
     @Published var showAlert = false
     @Published var alertMessage = ""
+    @Published var backupReadiness: MessageBackupReadiness = .unknown
+    @Published var backupReadinessMessage = ""
+    @Published var isExporting = false
+    @Published var exportProgressText = ""
+    @Published var exportProgress: Double = 0
+    @Published var exportResult: MessageExportResult?
 
     private var exporter: MessageExporter?
     private var backupPath: String?
+    private var exportCancelled = false
+    private var exportTask: Task<Void, Never>?
 
     func loadChats(from backupPath: String) {
         self.backupPath = backupPath
+        backupReadiness = Self.readiness(for: backupPath)
+        backupReadinessMessage = backupReadiness.subtitle
         selectedChat = nil
         messages = []
         searchResults = []
         isLoading = true
+
+        guard backupReadiness == .ready else {
+            exporter = nil
+            chats = []
+            isLoading = false
+            return
+        }
 
         // Best-effort contact directory: if the AddressBook database isn't in
         // the backup (encrypted backup, partial restore, etc.) we still want
@@ -40,6 +147,8 @@ final class MessageViewModel: ObservableObject {
             self.exporter = exporter
             chats = try exporter.getChats()
         } catch {
+            backupReadiness = Self.classifyLoadError(error)
+            backupReadinessMessage = backupReadiness.subtitle
             alertMessage = "Could not load messages: \(error.localizedDescription)"
             showAlert = true
             chats = []
@@ -73,31 +182,184 @@ final class MessageViewModel: ObservableObject {
         }
     }
 
-    func exportChat(format: MessageExportFormat, to path: String) -> Bool {
-        guard let chatId = selectedChat?.id, let exporter else { return false }
-        // The system file panel may have stripped or replaced our extension.
-        // Re-anchor the output to the format the user actually picked so HTML
-        // exports don't land as `.txt` (issue #17).
-        let normalisedPath = ensureExtension(path, for: format)
-        do {
-            try exporter.exportChat(chatId: chatId, format: format, to: normalisedPath)
-            return true
-        } catch {
-            alertMessage = "Export failed: \(error.localizedDescription)"
-            showAlert = true
-            return false
+    func filteredMessages(searchText: String, dateFilter: MessageDateFilter, customStart: Date = Date(), customEnd: Date = Date()) -> [Message] {
+        let range = dateFilter.range(customStart: customStart, customEnd: customEnd)
+        return messages.filter { message in
+            if let start = range.start, message.date < start { return false }
+            if let end = range.end, message.date > end { return false }
+            guard !searchText.isEmpty else { return true }
+            return message.displayText.localizedCaseInsensitiveContains(searchText)
+                || message.senderLabel.localizedCaseInsensitiveContains(searchText)
+                || message.attachments.contains { $0.displayName.localizedCaseInsensitiveContains(searchText) }
         }
     }
 
-    func exportAllChats(format: MessageExportFormat, to directory: String) -> Int {
-        guard let exporter else { return 0 }
-        do {
-            return try exporter.exportAllChats(format: format, to: directory)
-        } catch {
-            alertMessage = "Export failed: \(error.localizedDescription)"
-            showAlert = true
-            return 0
+    func cancelExport() {
+        exportCancelled = true
+        exportTask?.cancel()
+        exportProgressText = "Cancelling…"
+    }
+
+    func startExportChat(format: MessageExportFormat, to path: String, dateFilter: MessageDateFilter = .all, customStart: Date = Date(), customEnd: Date = Date(), includeAttachments: Bool = true, visibleMessages: [Message]? = nil) {
+        guard let chat = selectedChat, let backupPath else { return }
+        let normalisedPath = ensureExtension(path, for: format)
+        let range = dateFilter.range(customStart: customStart, customEnd: customEnd)
+        let options = MessageExportOptions(startDate: range.start, endDate: range.end, includeAttachments: includeAttachments)
+        let sourceMessages = visibleMessages
+        let fallbackMessages = messages
+        isExporting = true
+        exportCancelled = false
+        exportProgress = 0.1
+        exportProgressText = "Exporting \(chat.title)…"
+
+        exportTask = Task.detached(priority: .userInitiated) { [weak self, chat, sourceMessages, fallbackMessages, backupPath] in
+            do {
+                let exporter = try MessageExporter(backupPath: backupPath, contacts: .empty)
+                let baseMessages: [Message]
+                if let sourceMessages {
+                    baseMessages = sourceMessages
+                } else if fallbackMessages.isEmpty {
+                    baseMessages = try exporter.getMessages(chatId: chat.id)
+                } else {
+                    baseMessages = fallbackMessages
+                }
+                let filtered = options.apply(to: baseMessages)
+                try Task.checkCancellation()
+                try exporter.exportMessages(filtered, chatTitle: chat.title, format: format, to: normalisedPath, options: options)
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.isExporting = false
+                    self.exportProgress = 1
+                    self.exportResult = MessageExportResult(url: URL(fileURLWithPath: normalisedPath), summary: "Exported \(filtered.count) messages")
+                }
+            } catch is CancellationError {
+                await MainActor.run { [weak self] in
+                    self?.isExporting = false
+                    self?.alertMessage = "Export cancelled"
+                    self?.showAlert = true
+                }
+            } catch {
+                await MainActor.run { [weak self] in
+                    self?.isExporting = false
+                    self?.alertMessage = "Export failed: \(error.localizedDescription)"
+                    self?.showAlert = true
+                }
+            }
         }
+    }
+
+    func startExportAllChats(format: MessageExportFormat, to directory: String, dateFilter: MessageDateFilter = .all, customStart: Date = Date(), customEnd: Date = Date(), includeAttachments: Bool = true) {
+        guard let backupPath else { return }
+        let range = dateFilter.range(customStart: customStart, customEnd: customEnd)
+        let options = MessageExportOptions(startDate: range.start, endDate: range.end, includeAttachments: includeAttachments)
+        isExporting = true
+        exportCancelled = false
+        exportProgress = 0
+        exportProgressText = "Preparing export…"
+
+        exportTask = Task.detached(priority: .userInitiated) { [weak self, backupPath] in
+            do {
+                let exporter = try MessageExporter(backupPath: backupPath, contacts: .empty)
+                let count = try exporter.exportAllChats(format: format, to: directory, options: options) { completed, total, title in
+                    try Task.checkCancellation()
+                    let progress = total == 0 ? 0 : Double(completed) / Double(total)
+                    Task { @MainActor [weak self] in
+                        self?.exportProgress = progress
+                        self?.exportProgressText = completed >= total ? "Export complete" : "Exporting \(completed + 1) of \(total): \(title)"
+                    }
+                }
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.isExporting = false
+                    self.exportProgress = 1
+                    self.exportResult = MessageExportResult(url: URL(fileURLWithPath: directory), summary: "Exported \(count) conversations")
+                }
+            } catch is CancellationError {
+                await MainActor.run { [weak self] in
+                    self?.isExporting = false
+                    self?.alertMessage = "Export cancelled"
+                    self?.showAlert = true
+                }
+            } catch {
+                await MainActor.run { [weak self] in
+                    self?.isExporting = false
+                    self?.alertMessage = "Export failed: \(error.localizedDescription)"
+                    self?.showAlert = true
+                }
+            }
+        }
+    }
+
+    func revealLastExport() {
+        guard let url = exportResult?.url else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    func openLastExport() {
+        guard let url = exportResult?.url else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    private static func readiness(for backupPath: String) -> MessageBackupReadiness {
+        let fm = FileManager.default
+        guard fm.isReadableFile(atPath: backupPath) else {
+            return .permissionDenied("Backup folder is not readable.")
+        }
+
+        if let manifest = PlistParser.parseManifest(backupPath), manifest.isEncrypted {
+            return .encryptedBackup
+        }
+
+        let sms = "\(backupPath)/3d/\(MessageExporter.smsDbHash)"
+        guard fm.fileExists(atPath: sms) else {
+            return .noMessagesDatabase
+        }
+        guard fm.isReadableFile(atPath: sms) else {
+            return .permissionDenied("sms.db exists but is not readable.")
+        }
+
+        do {
+            let reader = try SQLiteReader(path: sms)
+            let tables = Set(try reader.tableNames())
+            let required = ["message", "chat", "chat_message_join"]
+            let missing = required.filter { !tables.contains($0) }
+            if !missing.isEmpty {
+                return .unsupportedSchema("Missing table(s): \(missing.joined(separator: ", ")).")
+            }
+            let messageCount = try reader.rowCount(for: "message")
+            if messageCount == 0 { return .emptyDatabase }
+            return .ready
+        } catch {
+            let description = error.localizedDescription
+            if description.localizedCaseInsensitiveContains("authorization") ||
+                description.localizedCaseInsensitiveContains("permission") ||
+                description.localizedCaseInsensitiveContains("unable to open") {
+                return .permissionDenied(description)
+            }
+            if description.localizedCaseInsensitiveContains("no such table") ||
+                description.localizedCaseInsensitiveContains("schema") {
+                return .unsupportedSchema(description)
+            }
+            return .loadError(description)
+        }
+    }
+
+    private static func classifyLoadError(_ error: Error) -> MessageBackupReadiness {
+        let description = error.localizedDescription
+        if description.localizedCaseInsensitiveContains("sms.db not found") ||
+            description.localizedCaseInsensitiveContains("file not found") {
+            return .noMessagesDatabase
+        }
+        if description.localizedCaseInsensitiveContains("permission") ||
+            description.localizedCaseInsensitiveContains("authorization") ||
+            description.localizedCaseInsensitiveContains("unable to open") {
+            return .permissionDenied(description)
+        }
+        if description.localizedCaseInsensitiveContains("no such table") ||
+            description.localizedCaseInsensitiveContains("no such column") {
+            return .unsupportedSchema(description)
+        }
+        return .loadError(description)
     }
 
     /// Ensure a path ends with the export format's expected extension. Replaces

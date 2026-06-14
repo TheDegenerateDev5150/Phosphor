@@ -11,6 +11,11 @@ struct MessageListView: View {
     @State private var showExportSheet = false
     @State private var exportFormat: MessageExportFormat = .html
     @State private var searchText = ""
+    @State private var messageSearchText = ""
+    @State private var dateFilter: MessageDateFilter = .all
+    @State private var customStartDate = Calendar.current.date(byAdding: .month, value: -1, to: Date()) ?? Date()
+    @State private var customEndDate = Date()
+    @State private var includeAttachments = true
 
     var body: some View {
         HSplitView {
@@ -22,10 +27,21 @@ struct MessageListView: View {
             messageDetailPane
         }
         .onAppear(perform: loadIfNeeded)
+        .overlay(alignment: .bottom) {
+            if messageVM.isExporting { exportProgressBar }
+        }
         .alert("Messages", isPresented: $messageVM.showAlert) {
             Button("OK") {}
         } message: {
             Text(messageVM.alertMessage)
+        }
+        .alert(item: $messageVM.exportResult) { result in
+            Alert(
+                title: Text("Export Complete"),
+                message: Text(result.summary),
+                primaryButton: .default(Text("Reveal in Finder")) { messageVM.revealLastExport() },
+                secondaryButton: .default(Text("Open")) { messageVM.openLastExport() }
+            )
         }
     }
 
@@ -100,9 +116,9 @@ struct MessageListView: View {
                 )
             } else if messageVM.chats.isEmpty {
                 EmptyStateView(
-                    icon: "message",
-                    title: "No Messages Found",
-                    subtitle: "This backup doesn't contain messages, or it may be encrypted.",
+                    icon: messageVM.backupReadiness.icon,
+                    title: messageVM.backupReadiness.title,
+                    subtitle: messageVM.backupReadiness.subtitle,
                     action: chooseBackupFolder,
                     actionLabel: "Choose Different Backup"
                 )
@@ -135,7 +151,7 @@ struct MessageListView: View {
                 .foregroundStyle(.secondary)
             Menu {
                 ForEach(backupVM.backups) { backup in
-                    Button("\(backup.displayName) • \(backup.relativeDate)") {
+                    Button("\(backup.displayName) • iOS \(backup.iosVersion) • \(backup.relativeDate)\(backup.isEncrypted ? " • Encrypted" : "")") {
                         selectBackup(backup)
                     }
                 }
@@ -145,7 +161,7 @@ struct MessageListView: View {
                 }
             } label: {
                 HStack {
-                    Text(backupVM.selectedBackup.map { "\($0.displayName) • \($0.relativeDate)" } ?? "Choose Backup")
+                    Text(backupVM.selectedBackup.map { "\($0.displayName) • iOS \($0.iosVersion) • \($0.relativeDate)\($0.isEncrypted ? " • Encrypted" : "")" } ?? "Choose Backup")
                         .lineLimit(1)
                     Image(systemName: "chevron.down")
                         .font(.system(size: 9, weight: .semibold))
@@ -209,6 +225,93 @@ struct MessageListView: View {
         .contentShape(Rectangle())
     }
 
+
+    private var displayedMessages: [Message] {
+        messageVM.filteredMessages(
+            searchText: messageSearchText,
+            dateFilter: dateFilter,
+            customStart: customStartDate,
+            customEnd: customEndDate
+        )
+    }
+
+    private var exportOptionsBar: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.tertiary)
+                TextField("Search this conversation…", text: $messageSearchText)
+                    .textFieldStyle(.plain)
+
+                Picker("Date", selection: $dateFilter) {
+                    ForEach(MessageDateFilter.allCases) { filter in
+                        Text(filter.rawValue).tag(filter)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 130)
+
+                Toggle("Attachments", isOn: $includeAttachments)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 11))
+            }
+            .padding(.horizontal, 16)
+
+            if dateFilter == .custom {
+                HStack(spacing: 8) {
+                    Text("From")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    DatePicker("Start", selection: $customStartDate, displayedComponents: [.date])
+                        .labelsHidden()
+                    Text("to")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    DatePicker("End", selection: $customEndDate, displayedComponents: [.date])
+                        .labelsHidden()
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+            }
+
+            if !messageSearchText.isEmpty || dateFilter != .all {
+                HStack {
+                    Text("Showing \(displayedMessages.count) of \(messageVM.messages.count) messages")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Clear Filters") {
+                        messageSearchText = ""
+                        dateFilter = .all
+                        customStartDate = Calendar.current.date(byAdding: .month, value: -1, to: Date()) ?? Date()
+                        customEndDate = Date()
+                    }
+                    .font(.system(size: 11))
+                }
+                .padding(.horizontal, 16)
+            }
+        }
+        .padding(.vertical, 8)
+        .background(Color(.controlBackgroundColor).opacity(0.35))
+    }
+
+    private var exportProgressBar: some View {
+        HStack(spacing: 12) {
+            ProgressView(value: messageVM.exportProgress)
+                .frame(width: 180)
+            Text(messageVM.exportProgressText)
+                .font(.system(size: 12))
+                .lineLimit(1)
+            Spacer()
+            Button("Cancel") { messageVM.cancelExport() }
+                .controlSize(.small)
+        }
+        .padding(12)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .padding()
+    }
+
     // MARK: - Message Detail
 
     private var messageDetailPane: some View {
@@ -243,11 +346,15 @@ struct MessageListView: View {
 
                 Divider()
 
+                exportOptionsBar
+
+                Divider()
+
                 // Messages
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(spacing: 4) {
-                            ForEach(messageVM.messages) { message in
+                            ForEach(displayedMessages) { message in
                                 MessageBubble(
                                     message: message,
                                     attachmentResolver: { messageVM.resolveAttachmentDiskPath(for: $0) }
@@ -294,7 +401,7 @@ struct MessageListView: View {
     }
 
     private func selectBackup(_ backup: BackupInfo) {
-        backupVM.selectedBackup = backup
+        backupVM.openBackupBrowser(backup)
         loadMessages(from: backup)
     }
 
@@ -331,10 +438,15 @@ struct MessageListView: View {
         panel.canCreateDirectories = true
 
         if panel.runModal() == .OK, let url = panel.url {
-            if messageVM.exportChat(format: format, to: url.path) {
-                messageVM.alertMessage = "Exported conversation"
-                messageVM.showAlert = true
-            }
+            messageVM.startExportChat(
+                format: format,
+                to: url.path,
+                dateFilter: dateFilter,
+                customStart: customStartDate,
+                customEnd: customEndDate,
+                includeAttachments: includeAttachments,
+                visibleMessages: displayedMessages
+            )
         }
     }
 
@@ -347,12 +459,14 @@ struct MessageListView: View {
         panel.message = "Choose a folder to export all conversations"
 
         if panel.runModal() == .OK, let url = panel.url {
-            messageVM.showAlert = false
-            let count = messageVM.exportAllChats(format: format, to: url.path)
-            if !messageVM.showAlert {
-                messageVM.alertMessage = count == 0 ? "No conversations exported" : "Exported \(count) conversations"
-                messageVM.showAlert = true
-            }
+            messageVM.startExportAllChats(
+                format: format,
+                to: url.path,
+                dateFilter: dateFilter,
+                customStart: customStartDate,
+                customEnd: customEndDate,
+                includeAttachments: includeAttachments
+            )
         }
     }
 
