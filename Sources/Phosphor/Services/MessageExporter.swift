@@ -5,6 +5,20 @@ import CommonCrypto
 ///
 /// The sms.db is stored at HomeDomain/Library/SMS/sms.db in the backup.
 /// Its SHA-1 hash in Manifest.db is the famous "3d0d7e5fb2ce288813306e4d4636395e047a3d28".
+struct MessageExportOptions {
+    var startDate: Date? = nil
+    var endDate: Date? = nil
+    var includeAttachments: Bool = true
+
+    func apply(to messages: [Message]) -> [Message] {
+        messages.filter { message in
+            if let startDate, message.date < startDate { return false }
+            if let endDate, message.date > endDate { return false }
+            return true
+        }
+    }
+}
+
 final class MessageExporter {
 
     /// The well-known SHA-1 hash for sms.db in iOS backups.
@@ -453,62 +467,53 @@ final class MessageExporter {
     // MARK: - Export
 
     /// Export messages to a file in the specified format.
-    func exportChat(chatId: Int, format: MessageExportFormat, to path: String) throws {
-        let messages = try getMessages(chatId: chatId)
+    func exportChat(chatId: Int, format: MessageExportFormat, to path: String, options: MessageExportOptions = MessageExportOptions()) throws {
+        let messages = options.apply(to: try getMessages(chatId: chatId))
         let chats = try getChats(includeEmpty: true, includeHidden: true)
         let chat = chats.first { $0.id == chatId }
         let chatTitle = chat?.title ?? "Unknown"
-
-        switch format {
-        case .csv:
-            try exportCSV(messages: messages, chatTitle: chatTitle, to: path)
-        case .txt:
-            try exportPlainText(messages: messages, chatTitle: chatTitle, to: path)
-        case .html:
-            try exportHTML(messages: messages, chatTitle: chatTitle, to: path)
-        case .json:
-            try exportJSON(messages: messages, chatTitle: chatTitle, to: path)
-        case .mbox:
-            try exportMbox(messages: messages, chatTitle: chatTitle, to: path)
-        }
+        try exportMessages(messages, chatTitle: chatTitle, format: format, to: path, options: options)
     }
 
     /// Export all conversations.
-    func exportAllChats(format: MessageExportFormat, to directory: String) throws -> Int {
+    func exportAllChats(
+        format: MessageExportFormat,
+        to directory: String,
+        options: MessageExportOptions = MessageExportOptions(),
+        onProgress: ((Int, Int, String) throws -> Void)? = nil
+    ) throws -> Int {
         let chats = try getChats()
         let fm = FileManager.default
         try fm.createDirectory(atPath: directory, withIntermediateDirectories: true)
 
         var count = 0
         for chat in chats {
+            try onProgress?(count, chats.count, chat.title)
             let safeName = chat.title
                 .replacingOccurrences(of: "/", with: "-")
                 .replacingOccurrences(of: ":", with: "-")
                 .prefix(50)
             let filename = "\(safeName).\(format.fileExtension)"
             let path = (directory as NSString).appendingPathComponent(String(filename))
-            let messages = try getMessages(chatId: chat.id)
-            try exportMessages(messages, chatTitle: chat.title, format: format, to: path)
+            try exportChat(chatId: chat.id, format: format, to: path, options: options)
             count += 1
         }
+        try onProgress?(count, chats.count, "Complete")
         return count
     }
 
-    private func exportMessages(_ messages: [Message],
-                                chatTitle: String,
-                                format: MessageExportFormat,
-                                to path: String) throws {
+    func exportMessages(_ messages: [Message], chatTitle: String, format: MessageExportFormat, to path: String, options: MessageExportOptions = MessageExportOptions()) throws {
         switch format {
         case .csv:
             try exportCSV(messages: messages, chatTitle: chatTitle, to: path)
         case .txt:
             try exportPlainText(messages: messages, chatTitle: chatTitle, to: path)
         case .html:
-            try exportHTML(messages: messages, chatTitle: chatTitle, to: path)
+            try exportHTML(messages: messages, chatTitle: chatTitle, to: path, includeAttachments: options.includeAttachments)
         case .json:
             try exportJSON(messages: messages, chatTitle: chatTitle, to: path)
         case .mbox:
-            try exportMbox(messages: messages, chatTitle: chatTitle, to: path)
+            try exportMbox(messages: messages, chatTitle: chatTitle, to: path, includeAttachments: options.includeAttachments)
         }
     }
 
@@ -616,8 +621,8 @@ final class MessageExporter {
         return map
     }
 
-    private func exportHTML(messages: [Message], chatTitle: String, to path: String) throws {
-        let attachmentMap = stageAttachments(messages: messages, htmlPath: path)
+    private func exportHTML(messages: [Message], chatTitle: String, to path: String, includeAttachments: Bool = true) throws {
+        let attachmentMap = includeAttachments ? stageAttachments(messages: messages, htmlPath: path) : [:]
         let outputURL = URL(fileURLWithPath: path)
         try? FileManager.default.removeItem(at: outputURL)
         FileManager.default.createFile(atPath: path, contents: nil)
@@ -746,7 +751,7 @@ final class MessageExporter {
     /// RFC 5322 envelope so Mail.app, Thunderbird, mutt, etc. can import the
     /// conversation as a mail folder. Attachments are embedded as base64 MIME parts
     /// when the backup file is available, otherwise referenced by name only.
-    private func exportMbox(messages: [Message], chatTitle: String, to path: String) throws {
+    private func exportMbox(messages: [Message], chatTitle: String, to path: String, includeAttachments: Bool = true) throws {
         let crlf = "\r\n"
         let userDomain = "phosphor.local"
         let outputURL = URL(fileURLWithPath: path)
@@ -806,7 +811,8 @@ final class MessageExporter {
             let payloadAttachment = msg.attachments.first(where: { !$0.isPluginPayload })
             let attachmentDiskPath = payloadAttachment?.filename.flatMap { resolveAttachmentDiskPath(filename: $0) }
 
-            if let payloadAttachment,
+            if includeAttachments,
+               let payloadAttachment,
                let attachmentDiskPath,
                let data = try? Data(contentsOf: URL(fileURLWithPath: attachmentDiskPath)) {
                 let boundary = "----=_Phosphor_\(msg.guid)"
