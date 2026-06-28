@@ -231,41 +231,90 @@ enum PyMobileDevice {
     }
 
     /// List connected devices with connection type (USB vs Network/Wi-Fi).
+    ///
+    /// Query USB and network explicitly before merging. Some pymobiledevice3
+    /// versions either omit Wi-Fi devices from the default usbmux snapshot or
+    /// omit ConnectionType there, which can make paired Wi-Fi devices disappear
+    /// or be misclassified as USB.
     static func listDevicesWithType() async -> [DeviceEntry] {
-        let result = await runAsync(["usbmux", "list"])
-        guard result.succeeded else { return [] }
+        async let usbResult = runAsync(["usbmux", "list", "--usb"])
+        async let networkResult = runAsync(["usbmux", "list", "--network"], timeout: 10)
 
-        let output = result.output
+        var entries: [DeviceEntry] = []
+        let usb = await usbResult
+        if usb.succeeded {
+            entries += parseUsbmuxDeviceEntries(from: usb.output, defaultConnectionType: "USB")
+        }
+
+        let network = await networkResult
+        if network.succeeded {
+            entries += parseUsbmuxDeviceEntries(from: network.output, defaultConnectionType: "Network")
+        }
+
+        if entries.isEmpty {
+            let fallback = await runAsync(["usbmux", "list"])
+            guard fallback.succeeded else { return [] }
+            entries = parseUsbmuxDeviceEntries(from: fallback.output, defaultConnectionType: "USB")
+        }
+
+        return mergeDeviceEntries(entries)
+    }
+
+    /// List devices currently reachable over network/Wi-Fi with connection metadata.
+    static func listNetworkDeviceEntries() async -> [DeviceEntry] {
+        let result = await runAsync(["usbmux", "list", "--network"], timeout: 10)
+        guard result.succeeded else { return [] }
+        return parseUsbmuxDeviceEntries(from: result.output, defaultConnectionType: "Network")
+    }
+
+    private static func parseUsbmuxDeviceEntries(
+        from output: String,
+        defaultConnectionType: String
+    ) -> [DeviceEntry] {
         if let data = output.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-            // Deduplicate: prefer USB over Network for same device
             var byUdid: [String: DeviceEntry] = [:]
+            var orderedUdids: [String] = []
+
             for entry in json {
                 guard let udid = entry["Identifier"] as? String
                         ?? entry["UniqueDeviceID"] as? String
                         ?? entry["SerialNumber"] as? String else { continue }
                 let connType = (entry["ConnectionType"] as? String)
                     ?? (entry["Properties"] as? [String: Any])?["ConnectionType"] as? String
-                    ?? "USB"
+                    ?? defaultConnectionType
                 let isUSB = connType.lowercased().contains("usb") || connType == "1"
                 let type = isUSB ? "USB" : "Network"
-                // USB takes priority over Network
-                if let existing = byUdid[udid] {
-                    if existing.connectionType != "USB" && type == "USB" {
-                        byUdid[udid] = DeviceEntry(udid: udid, connectionType: type)
-                    }
-                } else {
+
+                if byUdid[udid] == nil { orderedUdids.append(udid) }
+                if byUdid[udid]?.connectionType != "USB" || type == "USB" {
                     byUdid[udid] = DeviceEntry(udid: udid, connectionType: type)
                 }
             }
-            return Array(byUdid.values)
+
+            return orderedUdids.compactMap { byUdid[$0] }
         }
 
-        // Fallback: line-based, assume USB
         return output.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty && $0.count > 20 }
-            .map { DeviceEntry(udid: $0, connectionType: "USB") }
+            .map { DeviceEntry(udid: $0, connectionType: defaultConnectionType) }
+    }
+
+    private static func mergeDeviceEntries(_ entries: [DeviceEntry]) -> [DeviceEntry] {
+        var byUdid: [String: DeviceEntry] = [:]
+        var orderedUdids: [String] = []
+
+        for entry in entries {
+            if byUdid[entry.udid] == nil { orderedUdids.append(entry.udid) }
+            // Prefer USB when both transports are currently present; otherwise
+            // preserve Network so Wi-Fi-only backup paths can identify it.
+            if byUdid[entry.udid]?.connectionType != "USB" || entry.connectionType == "USB" {
+                byUdid[entry.udid] = entry
+            }
+        }
+
+        return orderedUdids.compactMap { byUdid[$0] }
     }
 
     // MARK: - Device Info
@@ -623,18 +672,7 @@ enum PyMobileDevice {
 
     /// List devices available over network.
     static func listNetworkDevices() async -> [String] {
-        let result = await runAsync(["usbmux", "list", "--network"], timeout: 10)
-        guard result.succeeded else { return [] }
-
-        let output = result.output
-        if let data = output.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-            return json.compactMap { $0["UniqueDeviceID"] as? String }
-        }
-
-        return output.components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && $0.count > 20 }
+        await listNetworkDeviceEntries().map(\.udid)
     }
 
     // MARK: - Diagnostics IORegistry

@@ -11,6 +11,9 @@ struct BackupListView: View {
     @State private var archiveProgress: String?
     @State private var isArchiving = false
     @State private var showScheduleSheet = false
+    @State private var showFullWiFiBackupConfirm = false
+    @State private var pendingFullWiFiBackupUDID: String?
+    @State private var pendingFullWiFiBackupPrefersNetwork = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -26,47 +29,7 @@ struct BackupListView: View {
 
                 Spacer()
 
-                Menu {
-                    Button {
-                        guard let udid = deviceVM.selectedDevice?.id else { return }
-                        Task { await backupVM.createBackup(udid: udid) }
-                    } label: {
-                        Label("Full Backup", systemImage: "externaldrive.badge.plus")
-                    }
-                    .disabled(deviceVM.selectedDevice == nil)
-
-                    Button {
-                        guard let udid = deviceVM.selectedDevice?.id else { return }
-                        Task { await backupVM.createBackup(udid: udid, incremental: true) }
-                    } label: {
-                        Label("Incremental Backup", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    .disabled(deviceVM.selectedDevice == nil)
-
-                    Divider()
-
-                    Button {
-                        importPhosphorArchive()
-                    } label: {
-                        Label("Import .phosphor Archive", systemImage: "square.and.arrow.down")
-                    }
-
-                    Button {
-                        backupVM.openExistingBackupFolder()
-                    } label: {
-                        Label("Open Existing Backup Folder...", systemImage: "folder")
-                    }
-
-                    Divider()
-
-                    Button {
-                        showScheduleSheet = true
-                    } label: {
-                        Label("Schedule Backups...", systemImage: "clock")
-                    }
-                } label: {
-                    Label("New Backup", systemImage: "plus")
-                }
+                newBackupMenu
                 .buttonStyle(.borderedProminent)
                 .tint(.indigo)
                 .disabled(backupVM.isCreating)
@@ -95,10 +58,10 @@ struct BackupListView: View {
                     title: "No Backups Found",
                     subtitle: "Back up your device, or pick an existing backup folder via New Backup -> Open Existing Backup Folder.",
                     action: {
-                        guard let udid = deviceVM.selectedDevice?.id else { return }
-                        Task { await backupVM.createBackup(udid: udid) }
+                        guard let device = deviceVM.selectedDevice else { return }
+                        startBackup(for: device, incremental: device.connectionType == .wifi)
                     },
-                    actionLabel: deviceVM.selectedDevice != nil ? "Create Backup" : nil
+                    actionLabel: deviceVM.selectedDevice?.connectionType == .wifi ? "Create Incremental Wi-Fi Backup" : (deviceVM.selectedDevice != nil ? "Create Backup" : nil)
                 )
             } else {
                 List {
@@ -131,11 +94,104 @@ struct BackupListView: View {
         } message: {
             Text(backupVM.alertMessage)
         }
+        .alert("Full Wi-Fi Backup?", isPresented: $showFullWiFiBackupConfirm) {
+            Button("Run Full Wi-Fi Backup") {
+                if let udid = pendingFullWiFiBackupUDID {
+                    let preferNetwork = pendingFullWiFiBackupPrefersNetwork
+                    Task { await backupVM.createBackup(udid: udid, incremental: false, preferNetwork: preferNetwork) }
+                }
+                pendingFullWiFiBackupUDID = nil
+                pendingFullWiFiBackupPrefersNetwork = false
+            }
+            Button("Cancel", role: .cancel) {
+                pendingFullWiFiBackupUDID = nil
+                pendingFullWiFiBackupPrefersNetwork = false
+            }
+        } message: {
+            Text("This device is connected over Wi-Fi. Full backups can be much slower and more sensitive to sleep/lock/network interruptions. Incremental Wi-Fi Backup is recommended unless you specifically need a full backup.")
+        }
         .sheet(isPresented: $showScheduleSheet) {
             BackupScheduleSheet()
                 .frame(width: 440, height: 400)
         }
         .onAppear { backupVM.loadBackups() }
+    }
+
+    private var newBackupMenu: some View {
+        Menu {
+            backupCreationButtons
+
+            Divider()
+
+            Button {
+                importPhosphorArchive()
+            } label: {
+                Label("Import .phosphor Archive", systemImage: "square.and.arrow.down")
+            }
+
+            Button {
+                backupVM.openExistingBackupFolder()
+            } label: {
+                Label("Open Existing Backup Folder...", systemImage: "folder")
+            }
+
+            Divider()
+
+            Button {
+                showScheduleSheet = true
+            } label: {
+                Label("Schedule Backups...", systemImage: "clock")
+            }
+        } label: {
+            Label("New Backup", systemImage: "plus")
+        }
+    }
+
+    @ViewBuilder
+    private var backupCreationButtons: some View {
+        if deviceVM.selectedDevice?.connectionType == .wifi {
+            Button {
+                guard let device = deviceVM.selectedDevice else { return }
+                startBackup(for: device, incremental: true)
+            } label: {
+                Label("Incremental Wi-Fi Backup (Recommended)", systemImage: "wifi")
+            }
+            .disabled(deviceVM.selectedDevice == nil)
+
+            Button {
+                guard let device = deviceVM.selectedDevice else { return }
+                startBackup(for: device, incremental: false)
+            } label: {
+                Label("Full Wi-Fi Backup (Slower)", systemImage: "externaldrive.badge.plus")
+            }
+            .disabled(deviceVM.selectedDevice == nil)
+        } else {
+            Button {
+                guard let device = deviceVM.selectedDevice else { return }
+                startBackup(for: device, incremental: false)
+            } label: {
+                Label("Full USB Backup (Fastest)", systemImage: "externaldrive.badge.plus")
+            }
+            .disabled(deviceVM.selectedDevice == nil)
+
+            Button {
+                guard let device = deviceVM.selectedDevice else { return }
+                startBackup(for: device, incremental: true)
+            } label: {
+                Label("Incremental Backup", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .disabled(deviceVM.selectedDevice == nil)
+        }
+    }
+
+    private func startBackup(for device: DeviceInfo, incremental: Bool) {
+        if device.connectionType == .wifi && !incremental {
+            pendingFullWiFiBackupUDID = device.id
+            pendingFullWiFiBackupPrefersNetwork = true
+            showFullWiFiBackupConfirm = true
+            return
+        }
+        Task { await backupVM.createBackup(udid: device.id, incremental: incremental, preferNetwork: device.connectionType == .wifi) }
     }
 
     private func importPhosphorArchive() {

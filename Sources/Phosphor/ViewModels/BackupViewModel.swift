@@ -80,17 +80,17 @@ final class BackupViewModel: ObservableObject {
         }
     }
 
-    func createBackup(udid: String, incremental: Bool = false) async {
+    func createBackup(udid: String, incremental: Bool = false, preferNetwork: Bool = false) async {
         isCreating = true
         progressText = "Preparing..."
 
         let success: Bool
         if incremental {
-            success = await backupManager.createIncrementalBackup(udid: udid) { [weak self] text in
+            success = await backupManager.createIncrementalBackup(udid: udid, preferNetwork: preferNetwork) { [weak self] text in
                 self?.progressText = text
             }
         } else {
-            success = await backupManager.createBackup(udid: udid) { [weak self] text in
+            success = await backupManager.createBackup(udid: udid, preferNetwork: preferNetwork) { [weak self] text in
                 self?.progressText = text
             }
         }
