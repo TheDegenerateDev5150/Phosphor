@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="Resources/banner.svg" alt="Phosphor Banner" width="100%">
+  <img src="Resources/banner.png" alt="Phosphor Banner" width="100%">
 </p>
 
 <p align="center">

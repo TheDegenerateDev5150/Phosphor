@@ -1,105 +1,44 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#6E6CE6"/>
-      <stop offset="100%" stop-color="#4240B8"/>
+    <linearGradient id="body" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#6F6DEA"/>
+      <stop offset="52%" stop-color="#5654D6"/>
+      <stop offset="100%" stop-color="#4340BE"/>
     </linearGradient>
-    <linearGradient id="glow" x1="0.5" y1="0" x2="0.5" y2="1">
-      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.95"/>
-      <stop offset="60%" stop-color="#A5A3FF" stop-opacity="0.6"/>
-      <stop offset="100%" stop-color="#5856D6" stop-opacity="0"/>
-    </linearGradient>
-    <linearGradient id="pGrad" x1="0.5" y1="0" x2="0.5" y2="1">
-      <stop offset="0%" stop-color="#FFFFFF"/>
-      <stop offset="100%" stop-color="#D4D3FF"/>
-    </linearGradient>
-    <radialGradient id="beacon" cx="0.5" cy="0.28" r="0.45">
-      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.3"/>
-      <stop offset="100%" stop-color="#5856D6" stop-opacity="0"/>
+    <radialGradient id="topSheen" cx="0.5" cy="0.12" r="0.85">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.30"/>
+      <stop offset="45%" stop-color="#FFFFFF" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
     </radialGradient>
-    <filter id="glowFilter" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="18"/>
+    <radialGradient id="baseShade" cx="0.5" cy="1.0" r="0.9">
+      <stop offset="0%" stop-color="#1B1A52" stop-opacity="0.45"/>
+      <stop offset="55%" stop-color="#1B1A52" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.55"/>
+      <stop offset="14%" stop-color="#FFFFFF" stop-opacity="0.10"/>
+      <stop offset="60%" stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.18"/>
+    </linearGradient>
+    <linearGradient id="pFill" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#ECECF7"/>
+    </linearGradient>
+    <filter id="pShadow" x="-30%" y="-30%" width="160%" height="180%">
+      <feDropShadow dx="0" dy="9" stdDeviation="12" flood-color="#1A1850" flood-opacity="0.28"/>
     </filter>
-    <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="8"/>
-    </filter>
+    <clipPath id="bodyClip"><rect x="100" y="100" width="824" height="824" rx="185" ry="185"/></clipPath>
   </defs>
 
-  <!-- Background -->
-  <rect width="1024" height="1024" rx="0" fill="url(#bg)"/>
-
-  <!-- Subtle radial beacon glow from top -->
-  <circle cx="512" cy="290" r="460" fill="url(#beacon)"/>
-
-  <!-- Circuit/tech line accents - subtle -->
-  <g stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="2" fill="none">
-    <!-- Horizontal lines -->
-    <line x1="100" y1="350" x2="300" y2="350"/>
-    <line x1="724" y1="350" x2="924" y2="350"/>
-    <line x1="100" y1="680" x2="250" y2="680"/>
-    <line x1="774" y1="680" x2="924" y2="680"/>
-    <!-- Vertical lines -->
-    <line x1="200" y1="350" x2="200" y2="450"/>
-    <line x1="824" y1="350" x2="824" y2="450"/>
-    <!-- Small dots at intersections -->
-    <circle cx="200" cy="350" r="4" fill="#FFFFFF" fill-opacity="0.12" stroke="none"/>
-    <circle cx="300" cy="350" r="4" fill="#FFFFFF" fill-opacity="0.12" stroke="none"/>
-    <circle cx="724" cy="350" r="4" fill="#FFFFFF" fill-opacity="0.12" stroke="none"/>
-    <circle cx="824" cy="350" r="4" fill="#FFFFFF" fill-opacity="0.12" stroke="none"/>
-    <circle cx="200" cy="450" r="4" fill="#FFFFFF" fill-opacity="0.12" stroke="none"/>
-    <circle cx="824" cy="450" r="4" fill="#FFFFFF" fill-opacity="0.12" stroke="none"/>
-    <circle cx="250" cy="680" r="4" fill="#FFFFFF" fill-opacity="0.12" stroke="none"/>
-    <circle cx="774" cy="680" r="4" fill="#FFFFFF" fill-opacity="0.12" stroke="none"/>
+  <g clip-path="url(#bodyClip)">
+    <rect x="100" y="100" width="824" height="824" fill="url(#body)"/>
+    <rect x="100" y="100" width="824" height="824" fill="url(#baseShade)"/>
+    <rect x="100" y="100" width="824" height="824" fill="url(#topSheen)"/>
+    <g filter="url(#pShadow)">
+      <path transform="translate(292.199 741.000) scale(0.32571 -0.32571)" d="M285.33502197265625 434.33087158203125V696.333984375H632.000732421875Q753.6663818359375 696.333984375 821.6658630371094 758.166748046875Q889.6653442382812 819.99951171875 889.6653442382812 935.9987182617188V937.9987182617188Q889.6653442382812 1054.9979248046875 821.6658630371094 1115.9973449707031Q753.6663818359375 1176.9967651367188 632.000732421875 1176.9967651367188H285.33502197265625V1443H714.6685180664062Q872.669189453125 1443 989.6695861816406 1380.3331909179688Q1106.6699829101562 1317.6663818359375 1171.5034790039062 1204.332763671875Q1236.3369750976562 1090.9991455078125 1236.3369750976562 938.6653442382812V936.6653442382812Q1236.3369750976562 784.33154296875 1171.5034790039062 671.331298828125Q1106.6699829101562 558.3310546875 989.6695861816406 496.3309631347656Q872.669189453125 434.33087158203125 714.6685180664062 434.33087158203125ZM113.33251953125 0V1443H456.004150390625V0Z" fill="url(#pFill)"/>
+    </g>
   </g>
-
-  <!-- Outer glow behind the P -->
-  <ellipse cx="512" cy="460" rx="220" ry="260" fill="#FFFFFF" fill-opacity="0.06" filter="url(#glowFilter)"/>
-
-  <!-- Beacon rays emanating from the top of the P -->
-  <g stroke="#FFFFFF" stroke-opacity="0.12" stroke-width="3" stroke-linecap="round">
-    <line x1="512" y1="220" x2="512" y2="140"/>
-    <line x1="512" y1="220" x2="440" y2="155"/>
-    <line x1="512" y1="220" x2="584" y2="155"/>
-    <line x1="512" y1="220" x2="380" y2="185"/>
-    <line x1="512" y1="220" x2="644" y2="185"/>
-  </g>
-
-  <!-- Glowing dot at top of P -->
-  <circle cx="512" cy="220" r="24" fill="#FFFFFF" fill-opacity="0.25" filter="url(#softGlow)"/>
-  <circle cx="512" cy="220" r="10" fill="#FFFFFF" fill-opacity="0.6"/>
-
-  <!-- The P monogram -->
-  <g fill="url(#pGrad)">
-    <!-- Vertical stem of P -->
-    <rect x="370" y="240" width="80" height="560" rx="40"/>
-    <!-- Bowl of P (the curved part) -->
-    <path d="
-      M 410 240
-      L 560 240
-      C 700 240, 700 480, 560 480
-      L 410 480
-      L 410 400
-      L 540 400
-      C 600 400, 600 320, 540 320
-      L 410 320
-      Z
-    "/>
-  </g>
-
-  <!-- Inner highlight on the P bowl -->
-  <path d="
-    M 430 280
-    L 540 280
-    C 640 280, 640 440, 540 440
-    L 430 440
-    L 430 410
-    L 530 410
-    C 580 410, 580 310, 530 310
-    L 430 310
-    Z
-  " fill="#FFFFFF" fill-opacity="0.1"/>
-
-  <!-- Small phosphor glow dot inside the P bowl -->
-  <circle cx="530" cy="360" r="30" fill="#FFFFFF" fill-opacity="0.15" filter="url(#softGlow)"/>
-  <circle cx="530" cy="360" r="12" fill="#FFFFFF" fill-opacity="0.35"/>
+  <!-- subtle beveled rim, Apple-style -->
+  <rect x="101.25" y="101.25" width="821.5" height="821.5" rx="184" ry="184"
+        fill="none" stroke="url(#rim)" stroke-width="2.5"/>
 </svg>
