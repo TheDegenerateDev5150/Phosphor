@@ -28,15 +28,74 @@ struct DeviceOverviewView: View {
                     storage = await diagnostics.getStorageBreakdown(udid: device.id)
                 }
             } else {
-                EmptyStateView(
-                    icon: "iphone.and.arrow.forward",
-                    title: "No Device Connected",
-                    subtitle: "Connect your iPhone, iPad, or iPod touch via USB to manage it with Phosphor.",
-                    action: { Task { await deviceVM.refresh() } },
-                    actionLabel: "Scan for Devices"
-                )
+                noDeviceView
             }
         }
+    }
+
+    private var noDeviceView: some View {
+        VStack(spacing: 16) {
+            Image(systemName: deviceVM.nearbyWirelessDevices.isEmpty ? "iphone.and.arrow.forward" : "wifi")
+                .font(.system(size: 44))
+                .foregroundStyle(.quaternary)
+
+            Text(deviceVM.nearbyWirelessDevices.isEmpty ? "No Device Connected" : "Wireless Device Nearby")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.primary)
+
+            Text(deviceVM.nearbyWirelessDevices.isEmpty
+                 ? "Connect your iPhone, iPad, or iPod touch via USB to manage it with Phosphor."
+                 : "Finder can see a wireless iPhone/iPad, but Phosphor's backup tools cannot open a usbmux connection to it yet.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 380)
+
+            if !deviceVM.nearbyWirelessDevices.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Finder-visible devices")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+
+                    ForEach(deviceVM.nearbyWirelessDevices, id: \.id) { device in
+                        HStack(spacing: 8) {
+                            Image(systemName: "iphone.radiowaves.left.and.right")
+                                .foregroundStyle(.blue)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(device.name)
+                                    .font(.system(size: 13, weight: .medium))
+                                if let host = device.host {
+                                    Text(host)
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: 380, alignment: .leading)
+                .background(.regularMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                Text("Unlock the device, plug it in once, tap Trust, enable Finder Wi-Fi sync, then unplug and scan again.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 380)
+            }
+
+            Button {
+                Task { await deviceVM.refresh() }
+            } label: {
+                Text("Scan for Devices")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.indigo)
+            .controlSize(.regular)
+            .padding(.top, 4)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Device Card

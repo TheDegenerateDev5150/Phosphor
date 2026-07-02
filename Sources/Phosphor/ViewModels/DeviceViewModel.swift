@@ -7,6 +7,7 @@ import Combine
 final class DeviceViewModel: ObservableObject {
 
     @Published var devices: [DeviceInfo] = []
+    @Published var nearbyWirelessDevices: [PyMobileDevice.BonjourDevice] = []
     @Published var selectedDevice: DeviceInfo?
     @Published var isRefreshing = false
     @Published var showPairAlert = false
@@ -23,6 +24,12 @@ final class DeviceViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
+        deviceManager.$nearbyWirelessDevices
+            .sink { [weak self] devices in
+                self?.nearbyWirelessDevices = devices
+            }
+            .store(in: &cancellables)
+
         deviceManager.$selectedDevice
             .sink { [weak self] device in
                 self?.selectedDevice = device
@@ -36,6 +43,7 @@ final class DeviceViewModel: ObservableObject {
         isRefreshing = true
         await deviceManager.scanForDevices(forceRefresh: true)
         devices = deviceManager.connectedDevices
+        nearbyWirelessDevices = deviceManager.nearbyWirelessDevices
         selectedDevice = deviceManager.selectedDevice
         isRefreshing = false
     }

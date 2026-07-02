@@ -7,6 +7,7 @@ import Combine
 final class DeviceManager: ObservableObject {
 
     @Published var connectedDevices: [DeviceInfo] = []
+    @Published var nearbyWirelessDevices: [PyMobileDevice.BonjourDevice] = []
     @Published var selectedDevice: DeviceInfo?
     @Published var isScanning = false
     @Published var lastError: String?
@@ -17,10 +18,12 @@ final class DeviceManager: ObservableObject {
     private var batteryInfoCache: [String: (info: [String: String], fetchedAt: Date)] = [:]
     private var pairStatusCache: [String: (isPaired: Bool, fetchedAt: Date)] = [:]
     private var networkDeviceCache: (entries: [PyMobileDevice.DeviceEntry], fetchedAt: Date)?
+    private var bonjourDeviceCache: (devices: [PyMobileDevice.BonjourDevice], fetchedAt: Date)?
     private let deviceInfoRefreshInterval: TimeInterval = 30
     private let batteryInfoRefreshInterval: TimeInterval = 60
     private let pairStatusRefreshInterval: TimeInterval = 120
     private let networkDeviceRefreshInterval: TimeInterval = 30
+    private let bonjourDeviceRefreshInterval: TimeInterval = 30
 
     // MARK: - Dependency Check
 
@@ -60,7 +63,9 @@ final class DeviceManager: ObservableObject {
         // network-only snapshot so devices already paired to this Mac over Wi-Fi
         // can appear even when no USB cable is attached.
         var entries = await PyMobileDevice.listDevicesWithType()
-        entries = mergeDeviceEntries(entries + (await cachedNetworkDeviceEntries(forceRefresh: forceRefresh)))
+        if !entries.contains(where: { $0.discoveryMethod == "mobdev2" }) {
+            entries = mergeDeviceEntries(entries + (await cachedNetworkDeviceEntries(forceRefresh: forceRefresh)))
+        }
 
         // Fallback: libimobiledevice. Include both USB and network-only listings.
         if entries.isEmpty {
@@ -68,7 +73,9 @@ final class DeviceManager: ObservableObject {
         }
 
         if entries.isEmpty {
+            let bonjourDevices = await cachedBonjourDevices(forceRefresh: forceRefresh)
             connectedDevices = []
+            nearbyWirelessDevices = bonjourDevices
             selectedDevice = nil
             deviceInfoCache.removeAll()
             batteryInfoCache.removeAll()
@@ -76,6 +83,8 @@ final class DeviceManager: ObservableObject {
             networkDeviceCache = nil
             return
         }
+
+        nearbyWirelessDevices = []
 
         let visibleUDIDs = Set(entries.map(\.udid))
         deviceInfoCache = deviceInfoCache.filter { visibleUDIDs.contains($0.key) }
@@ -92,6 +101,7 @@ final class DeviceManager: ObservableObject {
             if var device = await fetchDeviceInfo(
                 udid: entry.udid,
                 connectionType: connType,
+                discoveryInfo: entry.discoveryInfo,
                 forceRefresh: forceRefresh
             ) {
                 device.connectionType = connType
@@ -118,6 +128,17 @@ final class DeviceManager: ObservableObject {
         let entries = await PyMobileDevice.listNetworkDeviceEntries()
         networkDeviceCache = (entries, Date())
         return entries
+    }
+
+    private func cachedBonjourDevices(forceRefresh: Bool = false) async -> [PyMobileDevice.BonjourDevice] {
+        if !forceRefresh,
+           let cached = bonjourDeviceCache,
+           Date().timeIntervalSince(cached.fetchedAt) < bonjourDeviceRefreshInterval {
+            return cached.devices
+        }
+        let devices = await PyMobileDevice.listBonjourMobileDevices()
+        bonjourDeviceCache = (devices, Date())
+        return devices
     }
 
     private func listLibimobiledeviceEntries() async -> [PyMobileDevice.DeviceEntry] {
@@ -173,8 +194,13 @@ final class DeviceManager: ObservableObject {
     func fetchDeviceInfo(
         udid: String,
         connectionType: DeviceInfo.ConnectionType = .usb,
+        discoveryInfo: [String: String] = [:],
         forceRefresh: Bool = false
     ) async -> DeviceInfo? {
+        if !discoveryInfo.isEmpty {
+            return deviceInfo(fromDiscoveryInfo: discoveryInfo, udid: udid, connectionType: connectionType)
+        }
+
         // Primary: pymobiledevice3
         let info = await PyMobileDevice.deviceInfo(udid: udid)
         if !info.isEmpty {
@@ -271,6 +297,29 @@ final class DeviceManager: ObservableObject {
             isActivated: liInfo["ActivationState"] == "Activated",
             basebandVersion: liInfo["BasebandVersion"],
             activationState: liInfo["ActivationState"],
+            connectionType: connectionType
+        )
+    }
+
+    private func deviceInfo(
+        fromDiscoveryInfo info: [String: String],
+        udid: String,
+        connectionType: DeviceInfo.ConnectionType
+    ) -> DeviceInfo {
+        DeviceInfo(
+            id: udid,
+            name: info["DeviceName"] ?? "Wireless iPhone/iPad",
+            model: info["ProductType"] ?? info["DeviceClass"] ?? "Unknown",
+            modelNumber: info["ModelNumber"] ?? "",
+            productType: info["ProductType"] ?? "",
+            iosVersion: info["ProductVersion"] ?? "",
+            buildVersion: info["BuildVersion"] ?? "",
+            serialNumber: info["SerialNumber"] ?? "",
+            wifiAddress: info["WiFiAddress"] ?? info["ip"] ?? info["Identifier"] ?? "",
+            bluetoothAddress: info["BluetoothAddress"] ?? "",
+            isPaired: true,
+            isActivated: info["ActivationState"].map { $0 == "Activated" } ?? true,
+            activationState: info["ActivationState"],
             connectionType: connectionType
         )
     }

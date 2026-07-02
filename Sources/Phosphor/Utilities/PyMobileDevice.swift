@@ -228,6 +228,27 @@ enum PyMobileDevice {
     struct DeviceEntry {
         let udid: String
         let connectionType: String // "USB" or "Network"
+        let discoveryMethod: String
+        let discoveryInfo: [String: String]
+
+        init(
+            udid: String,
+            connectionType: String,
+            discoveryMethod: String = "usbmux",
+            discoveryInfo: [String: String] = [:]
+        ) {
+            self.udid = udid
+            self.connectionType = connectionType
+            self.discoveryMethod = discoveryMethod
+            self.discoveryInfo = discoveryInfo
+        }
+    }
+
+    struct BonjourDevice: Hashable {
+        let id: String
+        let name: String
+        let host: String?
+        let serviceName: String
     }
 
     /// List connected devices with connection type (USB vs Network/Wi-Fi).
@@ -253,8 +274,13 @@ enum PyMobileDevice {
 
         if entries.isEmpty {
             let fallback = await runAsync(["usbmux", "list"])
-            guard fallback.succeeded else { return [] }
-            entries = parseUsbmuxDeviceEntries(from: fallback.output, defaultConnectionType: "USB")
+            if fallback.succeeded {
+                entries = parseUsbmuxDeviceEntries(from: fallback.output, defaultConnectionType: "USB")
+            }
+        }
+
+        if entries.isEmpty {
+            entries = await listMobdev2DeviceEntries()
         }
 
         return mergeDeviceEntries(entries)
@@ -263,8 +289,60 @@ enum PyMobileDevice {
     /// List devices currently reachable over network/Wi-Fi with connection metadata.
     static func listNetworkDeviceEntries() async -> [DeviceEntry] {
         let result = await runAsync(["usbmux", "list", "--network"], timeout: 10)
+        let entries = result.succeeded
+            ? parseUsbmuxDeviceEntries(from: result.output, defaultConnectionType: "Network")
+            : []
+        return entries.isEmpty ? await listMobdev2DeviceEntries() : entries
+    }
+
+    /// List devices advertised by pymobiledevice3's mobdev2 Bonjour backend.
+    ///
+    /// This is the closest CLI path to Finder's wireless discovery on current
+    /// iOS/macOS releases. Unlike raw dns-sd TXT identifiers, mobdev2 returns
+    /// the real `UniqueDeviceID`, so Phosphor can present the device and try
+    /// pymobiledevice3 operations with `--mobdev2`.
+    static func listMobdev2DeviceEntries() async -> [DeviceEntry] {
+        let result = await runAsync(["bonjour", "mobdev2", "--timeout", "3"], timeout: 6)
         guard result.succeeded else { return [] }
-        return parseUsbmuxDeviceEntries(from: result.output, defaultConnectionType: "Network")
+        return parseMobdev2DeviceEntries(from: result.output)
+    }
+
+    /// List iOS devices advertised through Apple's Bonjour MobileDevice service.
+    ///
+    /// Finder can show a wirelessly paired device through this path even when
+    /// usbmux/lockdown tools cannot open a backup-capable connection yet. These
+    /// entries are discovery hints only; callers should not treat them as backup
+    /// targets because the Bonjour TXT identifier is not the device UDID.
+    static func listBonjourMobileDevices(timeout: TimeInterval = 3) async -> [BonjourDevice] {
+        let browse = await Shell.runAsync(
+            "/usr/bin/dns-sd",
+            arguments: ["-B", "_apple-mobdev2._tcp", "local"],
+            timeout: timeout
+        )
+        let serviceNames = parseBonjourBrowseOutput(browse.stdout)
+        guard !serviceNames.isEmpty else { return [] }
+
+        var devices: [BonjourDevice] = []
+        var seenIds: Set<String> = []
+        for serviceName in serviceNames {
+            let resolve = await Shell.runAsync(
+                "/usr/bin/dns-sd",
+                arguments: ["-L", serviceName, "_apple-mobdev2._tcp", "local"],
+                timeout: timeout
+            )
+            let host = parseBonjourHost(from: resolve.stdout)
+            let identifier = parseBonjourIdentifier(from: resolve.stdout)
+            let id = identifier ?? host ?? serviceName
+            guard seenIds.insert(id).inserted else { continue }
+            devices.append(BonjourDevice(
+                id: id,
+                name: displayName(forBonjourHost: host) ?? "Wireless iPhone/iPad",
+                host: host,
+                serviceName: serviceName
+            ))
+        }
+
+        return devices
     }
 
     private static func parseUsbmuxDeviceEntries(
@@ -301,6 +379,38 @@ enum PyMobileDevice {
             .map { DeviceEntry(udid: $0, connectionType: defaultConnectionType) }
     }
 
+    private static func parseMobdev2DeviceEntries(from output: String) -> [DeviceEntry] {
+        guard let data = output.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return []
+        }
+
+        var byUdid: [String: DeviceEntry] = [:]
+        var orderedUdids: [String] = []
+        for entry in json {
+            guard let udid = entry["UniqueDeviceID"] as? String else { continue }
+            if byUdid[udid] == nil { orderedUdids.append(udid) }
+
+            var info: [String: String] = [:]
+            for (key, value) in entry {
+                if let string = value as? String {
+                    info[key] = string
+                } else if let number = value as? NSNumber {
+                    info[key] = "\(number)"
+                }
+            }
+
+            byUdid[udid] = DeviceEntry(
+                udid: udid,
+                connectionType: "Network",
+                discoveryMethod: "mobdev2",
+                discoveryInfo: info
+            )
+        }
+
+        return orderedUdids.compactMap { byUdid[$0] }
+    }
+
     private static func mergeDeviceEntries(_ entries: [DeviceEntry]) -> [DeviceEntry] {
         var byUdid: [String: DeviceEntry] = [:]
         var orderedUdids: [String] = []
@@ -315,6 +425,50 @@ enum PyMobileDevice {
         }
 
         return orderedUdids.compactMap { byUdid[$0] }
+    }
+
+    private static func parseBonjourBrowseOutput(_ output: String) -> [String] {
+        var serviceNames: [String] = []
+        var seen: Set<String> = []
+
+        for line in output.components(separatedBy: "\n") {
+            guard line.contains(" Add "),
+                  let range = line.range(of: "_apple-mobdev2._tcp.") else { continue }
+            let name = String(line[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty, seen.insert(name).inserted else { continue }
+            serviceNames.append(name)
+        }
+
+        return serviceNames
+    }
+
+    private static func parseBonjourHost(from output: String) -> String? {
+        for line in output.components(separatedBy: "\n") where line.contains(" can be reached at ") {
+            guard let start = line.range(of: " can be reached at ")?.upperBound else { continue }
+            let suffix = line[start...]
+            guard let end = suffix.range(of: ":")?.lowerBound else { continue }
+            let host = String(suffix[..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !host.isEmpty { return host }
+        }
+        return nil
+    }
+
+    private static func parseBonjourIdentifier(from output: String) -> String? {
+        for token in output.components(separatedBy: .whitespacesAndNewlines) {
+            guard token.hasPrefix("identifier=") else { continue }
+            let id = String(token.dropFirst("identifier=".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !id.isEmpty { return id }
+        }
+        return nil
+    }
+
+    private static func displayName(forBonjourHost host: String?) -> String? {
+        guard var name = host?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { return nil }
+        if name.hasSuffix(".") { name.removeLast() }
+        if name.hasSuffix(".local") {
+            name = String(name.dropLast(".local".count))
+        }
+        return name.replacingOccurrences(of: "\\032", with: " ")
     }
 
     // MARK: - Device Info
@@ -561,12 +715,14 @@ enum PyMobileDevice {
         directory: String,
         udid: String? = nil,
         full: Bool = true,
+        preferNetwork: Bool = false,
         onOutput: @escaping (String) -> Void,
         onError: @escaping (String) -> Void = { _ in },
         completion: @escaping (Int32) -> Void
     ) -> Process? {
         var args = ["backup2", "backup"]
         if full { args.append("--full") }
+        if preferNetwork { args.append("--mobdev2") }
         if let udid { args += ["--udid", udid] }
         args.append(directory)
 

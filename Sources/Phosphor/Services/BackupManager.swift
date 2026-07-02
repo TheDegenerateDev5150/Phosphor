@@ -288,7 +288,12 @@ final class BackupManager: ObservableObject {
         }
 
         // Primary: pymobiledevice3
-        let pySuccess = await createBackupViaPymobiledevice(udid: udid, full: true, onProgress: onProgress)
+        let pySuccess = await createBackupViaPymobiledevice(
+            udid: udid,
+            full: true,
+            preferNetwork: preferNetwork,
+            onProgress: onProgress
+        )
         if pySuccess {
             isCreatingBackup = false
             backupProgress = "Backup complete"
@@ -359,7 +364,12 @@ final class BackupManager: ObservableObject {
     }
 
     /// Backup using pymobiledevice3.
-    private func createBackupViaPymobiledevice(udid: String, full: Bool, onProgress: @escaping (String) -> Void) async -> Bool {
+    private func createBackupViaPymobiledevice(
+        udid: String,
+        full: Bool,
+        preferNetwork: Bool,
+        onProgress: @escaping (String) -> Void
+    ) async -> Bool {
         guard PyMobileDevice.available() else {
             lastError = "pymobiledevice3 not installed. Install with: pipx install pymobiledevice3"
             return false
@@ -374,6 +384,7 @@ final class BackupManager: ObservableObject {
                 directory: Self.activeBackupDir,
                 udid: udid,
                 full: full,
+                preferNetwork: preferNetwork,
                 onOutput: { [weak self] output in
                     let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty {
@@ -436,7 +447,12 @@ final class BackupManager: ObservableObject {
 
         // Primary: pymobiledevice3 (without --full flag)
         if PyMobileDevice.available() {
-            let success = await createBackupViaPymobiledevice(udid: udid, full: false, onProgress: onProgress)
+            let success = await createBackupViaPymobiledevice(
+                udid: udid,
+                full: false,
+                preferNetwork: preferNetwork,
+                onProgress: onProgress
+            )
             if success {
                 isCreatingBackup = false
                 backupProgress = "Backup complete"

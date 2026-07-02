@@ -21,6 +21,42 @@ def test_pymobiledevice_queries_usb_and_network_before_fallback(root: Path) -> N
     assert_contains(src, '(entry["Properties"] as? [String: Any])?["ConnectionType"] as? String', "usbmux JSON parser should inspect nested Properties.ConnectionType")
 
 
+def test_bonjour_finder_visible_devices_are_discovery_hints(root: Path) -> None:
+    src = read(root, "Sources/Phosphor/Utilities/PyMobileDevice.swift")
+    assert_contains(src, "struct BonjourDevice", "Bonjour-discovered devices should use a separate hint model")
+    assert_contains(src, '"/usr/bin/dns-sd"', "Bonjour fallback should use macOS dns-sd directly")
+    assert_contains(src, '"_apple-mobdev2._tcp"', "Bonjour fallback should browse Apple's MobileDevice service")
+    assert_contains(src, "parseBonjourBrowseOutput", "Bonjour browse output should be parsed explicitly")
+    assert_contains(src, "parseBonjourHost", "Bonjour resolve output should preserve the advertised host")
+    assert_contains(src, "not the device UDID", "Bonjour identifiers must not be treated as backup-capable UDIDs")
+
+    manager = read(root, "Sources/Phosphor/Services/DeviceManager.swift")
+    assert_contains(manager, "nearbyWirelessDevices", "DeviceManager should publish Finder-visible wireless hints")
+    assert_contains(manager, "cachedBonjourDevices", "Bonjour discovery should be cached to avoid polling dns-sd constantly")
+    assert_contains(manager, "connectedDevices = []", "Bonjour-only devices should not be mixed into backup-capable devices")
+
+    view = read(root, "Sources/Phosphor/Views/Device/DeviceOverviewView.swift")
+    assert_contains(view, "Finder-visible devices", "Empty device state should disclose devices Finder can see")
+    assert_contains(view, "cannot open a usbmux connection", "UI should explain why Finder visibility is not enough")
+
+
+def test_mobdev2_wireless_discovery_uses_real_udid_and_pymobiledevice_backup(root: Path) -> None:
+    src = read(root, "Sources/Phosphor/Utilities/PyMobileDevice.swift")
+    assert_contains(src, '["bonjour", "mobdev2", "--timeout", "3"]', "wireless discovery should query pymobiledevice3 mobdev2 with a bounded browse timeout")
+    assert_contains(src, "parseMobdev2DeviceEntries", "mobdev2 JSON should be parsed into typed device entries")
+    assert_contains(src, 'entry["UniqueDeviceID"] as? String', "mobdev2 discovery must use the real device UDID")
+    assert_contains(src, 'discoveryMethod: "mobdev2"', "mobdev2 entries should preserve their discovery method")
+    assert_contains(src, "discoveryInfo", "mobdev2 metadata should be available for the UI without slow lockdown probes")
+    assert_contains(src, 'args.append("--mobdev2")', "pymobiledevice3 Wi-Fi backups should use the mobdev2 backend")
+
+    manager = read(root, "Sources/Phosphor/Services/DeviceManager.swift")
+    assert_contains(manager, "deviceInfo(fromDiscoveryInfo:", "DeviceManager should build cards from mobdev2 metadata")
+    assert_contains(manager, "entry.discoveryInfo", "scanForDevices should pass mobdev2 metadata into fetchDeviceInfo")
+
+    backup = read(root, "Sources/Phosphor/Services/BackupManager.swift")
+    assert_contains(backup, "preferNetwork: preferNetwork", "BackupManager should thread Wi-Fi preference into pymobiledevice3 backup")
+
+
 def test_device_entry_merge_prefers_usb_without_dropping_network_only(root: Path) -> None:
     src = read(root, "Sources/Phosphor/Utilities/PyMobileDevice.swift")
     merge = re.search(r"private static func mergeDeviceEntries\(_ entries: \[DeviceEntry\]\).*?\n    \}", src, re.S)
