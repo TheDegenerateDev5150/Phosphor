@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 
@@ -15,6 +16,11 @@ def test_phosphor_quits_after_last_window_closes(root: Path) -> None:
 
 def test_phosphor_preserves_reopen_window_recovery(root: Path) -> None:
     src = read(root, "Sources/Phosphor/App/PhosphorApp.swift")
-    assert "applicationShouldHandleReopen" in src, "Dock/app reopen should recreate a missing window"
-    assert "ensureWindowSoon()" in src, "reopen recovery should keep using the no-window guard"
+    reopen = re.search(
+        r"func\s+applicationShouldHandleReopen\(_ sender: NSApplication,\s*hasVisibleWindows flag: Bool\)\s*->\s*Bool\s*\{(?P<body>.*?)\n    \}",
+        src,
+        re.S,
+    )
+    assert reopen is not None, "Dock/app reopen should recreate a missing window"
+    assert "ensureWindowSoon()" in reopen.group("body"), "reopen recovery should call the no-window guard inside applicationShouldHandleReopen"
     assert "CommandGroup(replacing: .newItem)" not in src, "do not remove SwiftUI's standard New Window command"

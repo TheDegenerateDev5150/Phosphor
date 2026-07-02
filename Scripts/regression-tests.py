@@ -82,8 +82,14 @@ def test_app_lifecycle_quits_after_last_window_closes() -> None:
     src = read("Sources/Phosphor/App/PhosphorApp.swift")
     assert_contains(src, "applicationShouldTerminateAfterLastWindowClosed", "Phosphor should quit when the last app window closes")
     assert_contains(src, "-> Bool {\n        true\n    }", "last-window-close delegate should return true")
-    assert_contains(src, "applicationShouldHandleReopen", "Dock/app reopen should recreate a missing window")
-    assert_contains(src, "ensureWindowSoon()", "reopen recovery should keep using the no-window guard")
+    reopen = re.search(
+        r"func\s+applicationShouldHandleReopen\(_ sender: NSApplication,\s*hasVisibleWindows flag: Bool\)\s*->\s*Bool\s*\{(?P<body>.*?)\n    \}",
+        src,
+        re.S,
+    )
+    if reopen is None:
+        raise AssertionError("Dock/app reopen should recreate a missing window")
+    assert_contains(reopen.group("body"), "ensureWindowSoon()", "reopen recovery should call the no-window guard inside applicationShouldHandleReopen")
     assert_true("CommandGroup(replacing: .newItem)" not in src, "do not remove SwiftUI's standard New Window command")
 
 
