@@ -197,3 +197,51 @@ jobs:
           else
             echo "Cask already up-to-date."
           fi
+
+      - name: Sync external Homebrew tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          # No-op unless a tap PAT is configured. When set, keep the external tap
+          # (momenbasel/homebrew-phosphor) on the SAME version + DMG SHA as the
+          # in-repo cask, so `brew install --cask momenbasel/phosphor/phosphor`
+          # never drifts behind a release (root cause of issue #21).
+          if [ -z "${HOMEBREW_TAP_TOKEN:-}" ]; then
+            echo "HOMEBREW_TAP_TOKEN not set - skipping external tap sync."
+            echo "Add it at https://github.com/${{ github.repository }}/settings/secrets/actions to auto-sync the tap."
+            exit 0
+          fi
+
+          DMG=".build/Phosphor.dmg"
+          if ! xcrun stapler validate "$DMG" >/dev/null 2>&1; then
+            echo "::error::DMG has no stapled ticket. External tap not updated."
+            exit 1
+          fi
+
+          TAP_REPO="momenbasel/homebrew-phosphor"
+          TAP_CASK_PATH="Casks/phosphor.rb"
+          TAG="${GITHUB_REF##*/}"
+          VERSION="${TAG#v}"
+          SHA=$(shasum -a 256 "$DMG" | awk '{print $1}')
+
+          TAP_TMP="$(mktemp -d)"
+          git clone --depth 1 "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${TAP_REPO}.git" "$TAP_TMP"
+          CASK="$TAP_TMP/$TAP_CASK_PATH"
+          if [ ! -f "$CASK" ]; then
+            echo "::error::$TAP_CASK_PATH not found in $TAP_REPO"
+            exit 1
+          fi
+          /usr/bin/sed -i '' -E "s/^  version \".*\"/  version \"${VERSION}\"/" "$CASK"
+          /usr/bin/sed -i '' -E "s/^  sha256 \".*\"/  sha256 \"${SHA}\"/" "$CASK"
+          git -C "$TAP_TMP" config user.name  "github-actions[bot]"
+          git -C "$TAP_TMP" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$TAP_TMP" add "$TAP_CASK_PATH"
+          if ! git -C "$TAP_TMP" diff --cached --quiet; then
+            git -C "$TAP_TMP" commit -m "phosphor: bump cask to ${TAG} (same DMG SHA as in-repo cask)"
+            git -C "$TAP_TMP" push origin HEAD
+            echo "External tap synced to ${VERSION} / ${SHA}"
+          else
+            echo "External tap already up-to-date."
+          fi
+          rm -rf "$TAP_TMP"

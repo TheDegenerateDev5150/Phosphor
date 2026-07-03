@@ -65,7 +65,7 @@ gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 || \
     gh release create "$TAG" --repo "$REPO" "$DMG" --title "$TAG" --generate-notes
 gh release upload "$TAG" --repo "$REPO" "$DMG" --clobber
 
-echo "==> Bumping Homebrew cask"
+echo "==> Bumping in-repo Homebrew cask"
 CASK="Homebrew/phosphor.rb"
 /usr/bin/sed -i '' -E "s/^  version \".*\"/  version \"${VERSION}\"/" "$CASK"
 /usr/bin/sed -i '' -E "s/^  sha256 \".*\"/  sha256 \"${SHA}\"/" "$CASK"
@@ -75,6 +75,35 @@ if ! git diff --quiet "$CASK"; then
     git commit -m "homebrew: bump cask to $TAG"
     git push origin main
 fi
+
+# Keep the external tap (`brew install --cask momenbasel/phosphor/phosphor`) in
+# lockstep with the in-repo cask. Historically these drifted (issue #21: the tap
+# still pointed at an old SHA after a release), so sync it from the SAME SHA here
+# instead of by hand.
+echo "==> Syncing external Homebrew tap"
+TAP_REPO="${TAP_REPO:-momenbasel/homebrew-phosphor}"
+TAP_CASK_PATH="Casks/phosphor.rb"
+TAP_TMP="$(mktemp -d)"
+if git clone --depth 1 "https://github.com/${TAP_REPO}.git" "$TAP_TMP" >/dev/null 2>&1; then
+    TAP_CASK="$TAP_TMP/$TAP_CASK_PATH"
+    if [ -f "$TAP_CASK" ]; then
+        /usr/bin/sed -i '' -E "s/^  version \".*\"/  version \"${VERSION}\"/" "$TAP_CASK"
+        /usr/bin/sed -i '' -E "s/^  sha256 \".*\"/  sha256 \"${SHA}\"/" "$TAP_CASK"
+        if ! git -C "$TAP_TMP" diff --quiet; then
+            git -C "$TAP_TMP" add "$TAP_CASK_PATH"
+            git -C "$TAP_TMP" commit -m "phosphor: bump cask to $TAG (same DMG SHA as in-repo cask)"
+            git -C "$TAP_TMP" push origin HEAD
+            echo "    external tap synced to ${VERSION} / ${SHA}"
+        else
+            echo "    external tap already at ${VERSION} / ${SHA}"
+        fi
+    else
+        echo "    WARNING: $TAP_CASK_PATH missing in $TAP_REPO - sync it manually"
+    fi
+else
+    echo "    WARNING: could not clone $TAP_REPO - external tap NOT updated (fix manually to avoid SHA drift)"
+fi
+rm -rf "$TAP_TMP"
 
 echo
 echo "Released $TAG."
