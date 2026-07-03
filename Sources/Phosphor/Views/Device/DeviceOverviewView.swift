@@ -39,7 +39,7 @@ struct DeviceOverviewView: View {
                 .font(.system(size: 44))
                 .foregroundStyle(.quaternary)
 
-            Text(deviceVM.nearbyWirelessDevices.isEmpty ? "No Device Connected" : "Wireless Device Nearby")
+            Text(deviceVM.nearbyWirelessDevices.isEmpty ? "No Device Connected" : "Nearby, Not Backup-Ready")
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(.primary)
 

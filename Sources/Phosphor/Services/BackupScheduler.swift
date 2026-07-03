@@ -130,11 +130,14 @@ final class BackupScheduler: ObservableObject {
         let manager = BackupManager()
         let success: Bool
 
-        if schedule.incrementalOnly {
+        if schedule.incrementalOnly && BackupManager.hasExistingBackup(for: udid) {
             success = await manager.createIncrementalBackup(udid: udid, preferNetwork: preferNetwork) { [weak self] text in
                 self?.scheduledBackupProgress = text
             }
         } else {
+            if schedule.incrementalOnly {
+                addLog("No complete backup exists yet; running required first full backup", success: true)
+            }
             success = await manager.createBackup(udid: udid, preferNetwork: preferNetwork) { [weak self] text in
                 self?.scheduledBackupProgress = text
             }

@@ -11,6 +11,7 @@ final class BackupViewModel: ObservableObject {
     @Published var progressText = ""
     @Published var showAlert = false
     @Published var alertMessage = ""
+    @Published var backupIssue: BackupManager.BackupFailure?
     @Published var loadError: String?
 
     // Browser state
@@ -23,6 +24,13 @@ final class BackupViewModel: ObservableObject {
     let backupManager = BackupManager()
     private var currentManifest: BackupManifest?
     private var sizeResolutionTask: Task<Void, Never>?
+    private var lastBackupRequest: BackupRequest?
+
+    private struct BackupRequest {
+        let udid: String
+        let incremental: Bool
+        let preferNetwork: Bool
+    }
 
     func loadBackups() {
         sizeResolutionTask?.cancel()
@@ -81,6 +89,7 @@ final class BackupViewModel: ObservableObject {
     }
 
     func createBackup(udid: String, incremental: Bool = false, preferNetwork: Bool = false) async {
+        lastBackupRequest = BackupRequest(udid: udid, incremental: incremental, preferNetwork: preferNetwork)
         isCreating = true
         progressText = "Preparing..."
 
@@ -96,9 +105,38 @@ final class BackupViewModel: ObservableObject {
         }
 
         isCreating = false
-        alertMessage = success ? "Backup completed" : (backupManager.lastError ?? "Backup failed")
-        showAlert = true
-        if success { loadBackups() }
+        if success {
+            alertMessage = "Backup completed"
+            showAlert = true
+            loadBackups()
+        } else if let failure = backupManager.lastBackupFailure {
+            backupIssue = failure
+        } else {
+            alertMessage = backupManager.lastError ?? "Backup failed"
+            showAlert = true
+        }
+    }
+
+    func deleteIncompleteBackupAndRunFull(udid: String, preferNetwork: Bool) async {
+        do {
+            try BackupManager.deleteIncompleteBackup(for: udid)
+            backupIssue = nil
+            loadBackups()
+            await createBackup(udid: udid, incremental: false, preferNetwork: preferNetwork)
+        } catch {
+            backupIssue = BackupManager.BackupFailure(
+                title: "Could Not Delete Incomplete Backup",
+                message: "Phosphor could not remove the incomplete backup folder. Choose another backup folder or delete it manually, then try a full backup again.",
+                technicalDetails: error.localizedDescription,
+                recoveryAction: .openBackupSettings
+            )
+        }
+    }
+
+    func retryLastBackup() async {
+        guard let request = lastBackupRequest else { return }
+        backupIssue = nil
+        await createBackup(udid: request.udid, incremental: request.incremental, preferNetwork: request.preferNetwork)
     }
 
     // MARK: - Browsing

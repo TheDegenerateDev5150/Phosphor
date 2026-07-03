@@ -92,8 +92,14 @@ struct PhosphorApp: App {
 
             CommandMenu("Backup") {
                 Button("New Backup") {
-                    guard let udid = deviceVM.selectedDevice?.id else { return }
-                    Task { await backupVM.createBackup(udid: udid) }
+                    guard let device = deviceVM.selectedDevice else { return }
+                    Task {
+                        await backupVM.createBackup(
+                            udid: device.id,
+                            incremental: false,
+                            preferNetwork: device.connectionType == .wifi
+                        )
+                    }
                 }
                 .keyboardShortcut("b", modifiers: .command)
                 .disabled(deviceVM.selectedDevice == nil)

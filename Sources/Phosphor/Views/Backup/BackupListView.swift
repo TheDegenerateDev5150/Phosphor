@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Lists all discovered iOS backups with metadata. Allows creating new backups and managing existing ones.
@@ -43,6 +44,8 @@ struct BackupListView: View {
             .padding(20)
 
             Divider()
+
+            backupStateNotice
 
             if backupVM.isCreating {
                 backupProgressView
@@ -94,6 +97,14 @@ struct BackupListView: View {
         } message: {
             Text(backupVM.alertMessage)
         }
+        .sheet(item: $backupVM.backupIssue) { issue in
+            BackupIssueSheet(
+                issue: issue,
+                primaryActionTitle: backupIssueActionTitle(for: issue),
+                primaryAction: { handleBackupIssueAction(issue.recoveryAction) },
+                dismiss: { backupVM.backupIssue = nil }
+            )
+        }
         .alert("Full Wi-Fi Backup?", isPresented: $showFullWiFiBackupConfirm) {
             Button("Run Full Wi-Fi Backup") {
                 if let udid = pendingFullWiFiBackupUDID {
@@ -108,7 +119,7 @@ struct BackupListView: View {
                 pendingFullWiFiBackupPrefersNetwork = false
             }
         } message: {
-            Text("This device is connected over Wi-Fi. Full backups can be much slower and more sensitive to sleep/lock/network interruptions. Incremental Wi-Fi Backup is recommended unless you specifically need a full backup.")
+            Text(fullWiFiBackupConfirmationMessage)
         }
         .sheet(isPresented: $showScheduleSheet) {
             BackupScheduleSheet()
@@ -145,6 +156,44 @@ struct BackupListView: View {
         } label: {
             Label("New Backup", systemImage: "plus")
         }
+    }
+
+
+    @ViewBuilder
+    private var backupStateNotice: some View {
+        if let device = deviceVM.selectedDevice {
+            let state = backupState(for: device)
+            BackupStateNotice(title: state.title, detail: state.detail, icon: state.icon, tint: state.tint)
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+        }
+    }
+
+    private func backupState(for device: DeviceInfo) -> (title: String, detail: String, icon: String, tint: Color) {
+        let hasCompleteBackup = shouldOfferIncremental(for: device)
+        if device.connectionType == .wifi {
+            if hasCompleteBackup {
+                return (
+                    "Wi-Fi backup ready",
+                    "Incremental Wi-Fi backups are available. Keep the device unlocked and on the same network while the backup runs.",
+                    "wifi",
+                    .blue
+                )
+            }
+            return (
+                "First backup must be full",
+                "USB is recommended for the first backup. Wi-Fi is supported, but it is slower and more sensitive to sleep, lock, and network interruptions.",
+                "externaldrive.badge.plus",
+                .orange
+            )
+        }
+
+        return (
+            hasCompleteBackup ? "USB backup ready" : "USB recommended for first backup",
+            hasCompleteBackup ? "USB is the fastest and most reliable way to refresh this backup." : "Create a full USB backup first. After that, incremental backups can update only changed files.",
+            "cable.connector",
+            .green
+        )
     }
 
     @ViewBuilder
@@ -202,9 +251,54 @@ struct BackupListView: View {
         return "Create Backup"
     }
 
+    private var fullWiFiBackupConfirmationMessage: String {
+        guard let device = deviceVM.selectedDevice else {
+            return "This device is connected over Wi-Fi. Full backups can be slower and more sensitive to interruptions."
+        }
+        if shouldOfferIncremental(for: device) {
+            return "This device is connected over Wi-Fi. Full backups can be much slower and more sensitive to sleep, lock, and network interruptions. Incremental Wi-Fi Backup is recommended unless you specifically need a full backup."
+        }
+        return "This is the first backup for this device, so it must be a full backup. USB is recommended for the first backup; Wi-Fi is supported but slower and more sensitive to sleep, lock, and network interruptions."
+    }
+
     private func shouldOfferIncremental(for device: DeviceInfo) -> Bool {
         backupVM.backups.contains { backup in
             backup.udid == device.id || backup.id == device.id
+        }
+    }
+
+
+    private func backupIssueActionTitle(for issue: BackupManager.BackupFailure) -> String? {
+        switch issue.recoveryAction {
+        case .runFullBackup:
+            return "Run Full Backup"
+        case .deleteIncompleteAndRunFull:
+            return "Delete Incomplete Backup & Run Full"
+        case .openBackupSettings:
+            return "Open Backup Settings"
+        case .retry:
+            return "Retry"
+        case .none:
+            return nil
+        }
+    }
+
+    private func handleBackupIssueAction(_ action: BackupManager.RecoveryAction?) {
+        switch action {
+        case .runFullBackup:
+            guard let device = deviceVM.selectedDevice else { return }
+            backupVM.backupIssue = nil
+            Task { await backupVM.createBackup(udid: device.id, incremental: false, preferNetwork: device.connectionType == .wifi) }
+        case .deleteIncompleteAndRunFull:
+            guard let device = deviceVM.selectedDevice else { return }
+            Task { await backupVM.deleteIncompleteBackupAndRunFull(udid: device.id, preferNetwork: device.connectionType == .wifi) }
+        case .openBackupSettings:
+            backupVM.backupIssue = nil
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        case .retry:
+            Task { await backupVM.retryLastBackup() }
+        case .none:
+            backupVM.backupIssue = nil
         }
     }
 
@@ -285,6 +379,89 @@ struct BackupListView: View {
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
         .background(Color.orange.opacity(0.08))
+    }
+}
+
+
+struct BackupStateNotice: View {
+    let title: String
+    let detail: String
+    let icon: String
+    let tint: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .foregroundStyle(tint)
+                .font(.system(size: 16, weight: .semibold))
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                Text(detail)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+        }
+        .padding(12)
+        .background(tint.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+struct BackupIssueSheet: View {
+    let issue: BackupManager.BackupFailure
+    let primaryActionTitle: String?
+    let primaryAction: () -> Void
+    let dismiss: () -> Void
+    @State private var showTechnicalDetails = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .font(.system(size: 24))
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(issue.title)
+                        .font(.title3.weight(.semibold))
+                    Text(issue.message)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+
+            if let details = issue.technicalDetails, !details.isEmpty {
+                DisclosureGroup("Technical details", isExpanded: $showTechnicalDetails) {
+                    ScrollView {
+                        Text(details)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                    }
+                    .frame(minHeight: 90, maxHeight: 220)
+                    .background(Color.secondary.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                if let primaryActionTitle {
+                    Button(primaryActionTitle, role: issue.recoveryAction == .deleteIncompleteAndRunFull ? .destructive : nil) {
+                        primaryAction()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
     }
 }
 

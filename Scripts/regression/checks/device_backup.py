@@ -41,6 +41,7 @@ def test_bonjour_finder_visible_devices_are_discovery_hints(root: Path) -> None:
 
     view = read(root, "Sources/Phosphor/Views/Device/DeviceOverviewView.swift")
     assert_contains(view, "Finder-visible devices", "Empty device state should disclose devices Finder can see")
+    assert_contains(view, "Nearby, Not Backup-Ready", "Finder-visible-only devices should have a distinct non-backup-ready state")
     assert_contains(view, "cannot open a usbmux connection", "UI should explain why Finder visibility is not enough")
 
 
@@ -82,19 +83,47 @@ def test_wifi_schedules_use_network_discovery_and_network_backup_flag(root: Path
     assert_contains(scheduler, 'let fallbackArgs = schedule.wifiOnly ? ["-n"] : ["-l"]', "Wi-Fi-only fallback should use idevice_id -n")
     assert_contains(scheduler, "createIncrementalBackup(udid: udid, preferNetwork: preferNetwork)", "scheduled incremental backups should preserve network preference")
     assert_contains(scheduler, "createBackup(udid: udid, preferNetwork: preferNetwork)", "scheduled full backups should preserve network preference")
+    assert_contains(scheduler, "schedule.incrementalOnly && BackupManager.hasExistingBackup(for: udid)", "Scheduled incremental mode should run the required first full backup when metadata is missing")
+    assert_contains(scheduler, "running required first full backup", "Scheduled first-full fallback should be logged clearly")
 
 
 def test_incremental_backups_require_existing_metadata(root: Path) -> None:
     manager = read(root, "Sources/Phosphor/Services/BackupManager.swift")
     assert_contains(manager, "hasExistingBackup(for udid", "BackupManager should expose an existing-backup metadata preflight")
-    assert_contains(manager, "looksLikeBackupFolder(deviceDirectory)", "Existing-backup preflight should require Info.plist and Manifest metadata")
+    assert_contains(manager, "backupMetadataHealth(for udid", "BackupManager should distinguish complete, missing, and incomplete backup metadata")
+    assert_contains(manager, "looksLikeBackupFolder(deviceDirectory) ? .complete : .incomplete", "Existing-backup preflight should require Info.plist and Manifest metadata")
     assert_contains(manager, "Backup needs a full backup first", "Incremental backup should fail before backend calls when metadata is missing")
     assert_contains(manager, "Run a full backup first; future Wi-Fi backups can be incremental", "Missing metadata error should be actionable")
+    assert_contains(manager, "deleteIncompleteBackup(for udid", "Recovery flow should be able to remove interrupted partial backup folders")
 
     view = read(root, "Sources/Phosphor/Views/Backup/BackupListView.swift")
     assert_contains(view, "shouldOfferIncremental(for: device)", "Backup UI should only offer incremental when a backup exists for the selected device")
     assert_contains(view, "First Wi-Fi Backup (Full)", "First Wi-Fi backup action should be full, not incremental")
     assert_contains(view, "Create Full Wi-Fi Backup", "Empty Wi-Fi backup state should default to a full backup")
+    assert_contains(view, "First backup must be full", "Backup UI should explicitly explain first-backup state")
+    assert_contains(view, "USB is recommended for the first backup", "Backup UI should recommend USB for first full backups")
+
+
+def test_backup_failures_have_recovery_actions_and_collapsed_details(root: Path) -> None:
+    manager = read(root, "Sources/Phosphor/Services/BackupManager.swift")
+    assert_contains(manager, "struct BackupFailure", "Backup failures should be structured for user-facing recovery UI")
+    assert_contains(manager, "RecoveryAction", "Backup failures should carry recommended recovery actions")
+    assert_contains(manager, "lastBackupFailure", "BackupManager should publish structured backup failures")
+    assert_contains(manager, "technicalDetails", "Raw backend details should be separated from the short user-facing message")
+
+    vm = read(root, "Sources/Phosphor/ViewModels/BackupViewModel.swift")
+    assert_contains(vm, "backupIssue", "BackupViewModel should surface structured backup issues separately from success alerts")
+    assert_contains(vm, "retryLastBackup", "BackupViewModel should support recommended retry action")
+    assert_contains(vm, "deleteIncompleteBackupAndRunFull", "BackupViewModel should implement incomplete-backup recovery")
+
+    view = read(root, "Sources/Phosphor/Views/Backup/BackupListView.swift")
+    assert_contains(view, "BackupIssueSheet", "Backup failures should use a sheet instead of dumping raw tracebacks in an alert")
+    assert_contains(view, "DisclosureGroup(\"Technical details\"", "Technical details should be collapsed by default")
+    assert_contains(view, "Delete Incomplete Backup & Run Full", "Incomplete backup failures should offer a recovery action")
+    assert_contains(view, "Open Backup Settings", "Permission/folder failures should offer a settings action")
+
+    app = read(root, "Sources/Phosphor/App/PhosphorApp.swift")
+    assert_contains(app, "preferNetwork: device.connectionType == .wifi", "Backup menu command should preserve Wi-Fi network preference")
 
 
 def test_idevicebackup2_network_argument_order_is_before_backup_subcommand(root: Path) -> None:

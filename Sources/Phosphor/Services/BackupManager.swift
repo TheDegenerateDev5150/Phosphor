@@ -11,6 +11,28 @@ final class BackupManager: ObservableObject {
     @Published var backupProgress: String = ""
     @Published var backupPercent: Double = 0
     @Published var lastError: String?
+    @Published var lastBackupFailure: BackupFailure?
+
+    enum RecoveryAction: String, Hashable {
+        case runFullBackup
+        case deleteIncompleteAndRunFull
+        case openBackupSettings
+        case retry
+    }
+
+    struct BackupFailure: Identifiable, Hashable {
+        let id = UUID()
+        let title: String
+        let message: String
+        let technicalDetails: String?
+        let recoveryAction: RecoveryAction?
+    }
+
+    enum BackupMetadataHealth: Equatable {
+        case complete
+        case missing
+        case incomplete(path: String)
+    }
 
     /// Active backup process for cancellation.
     private var activeProcess: Process?
@@ -22,37 +44,37 @@ final class BackupManager: ObservableObject {
     private var pymobiledeviceStderrTail: [String] = []
 
     /// Translate a pymobiledevice3 or idevicebackup2 stderr blob into a short actionable hint.
-    private static func diagnosticHint(for stderr: String) -> String? {
+    private static func diagnostic(for stderr: String) -> (hint: String?, action: RecoveryAction?) {
         let lower = stderr.lowercased()
         if lower.contains("not paired") || lower.contains("pairingdialogresponsepending") || lower.contains("trust this computer") {
-            return "Device is not trusted. Unlock it and tap 'Trust' when prompted, then try again."
+            return ("Device is not trusted. Unlock it and tap 'Trust' when prompted, then try again.", .retry)
         }
         if lower.contains("passcodesetuprequired") || lower.contains("setpasscode") {
-            return "Set a passcode on the device before running an encrypted backup."
+            return ("Set a passcode on the device before running an encrypted backup.", .retry)
         }
         if lower.contains("no device found") || lower.contains("no devices connected") {
-            return "No device detected. Reconnect the cable and ensure the device is unlocked."
+            return ("No device detected. Reconnect the cable and ensure the device is unlocked.", .retry)
         }
         if lower.contains("backupdomainoverridden") || lower.contains("mobilebackup2error") {
-            return "iOS rejected the backup request. Disable/re-enable encryption or reboot the device."
+            return ("iOS rejected the backup request. Disable/re-enable encryption or reboot the device.", .retry)
         }
         if lower.contains("modulenotfounderror") || lower.contains("no module named") {
-            return "pymobiledevice3 is installed but missing dependencies. Reinstall with: pipx reinstall pymobiledevice3"
+            return ("pymobiledevice3 is installed but missing dependencies. Reinstall with: pipx reinstall pymobiledevice3", nil)
         }
         if lower.contains("invalidservice") || lower.contains("remotexpc") || lower.contains("tunneld") {
-            return "Backup requires an up-to-date pymobiledevice3. Upgrade with: pipx upgrade pymobiledevice3"
+            return ("Backup requires an up-to-date pymobiledevice3. Upgrade with: pipx upgrade pymobiledevice3", .retry)
         }
         if lower.contains("zero-length") || lower.contains("cannot parse a null") || lower.contains("mberrordomain/205") || lower.contains("error reading backup properties") {
-            return "The existing backup metadata appears incomplete or corrupt. Choose a fresh local backup folder and avoid cloud-synced folders for live backups, then retry with the device unlocked."
+            return ("The existing backup metadata appears incomplete or corrupt. Delete the incomplete backup or choose a fresh local backup folder, then run a full backup with the device unlocked.", .deleteIncompleteAndRunFull)
         }
         if lower.contains("is not readable") || lower.contains("permission denied") || lower.contains("operation not permitted") {
-            return """
+            return ("""
             macOS is blocking access to the backup directory. The easiest fix is to switch Phosphor's backup directory to a user-owned location:
             Phosphor -> Settings -> Backup Directory -> ~/Documents/Phosphor Backups.
             Only if you specifically want Phosphor to read Apple's shared MobileSync backups do you need to grant Full Disk Access (System Settings -> Privacy & Security -> Full Disk Access). Full Disk Access is not recommended - Phosphor does not need it for its own backups.
-            """
+            """, .openBackupSettings)
         }
-        return nil
+        return (nil, nil)
     }
 
     /// Preflight check: verify the active backup directory exists and is readable/writable
@@ -111,18 +133,27 @@ final class BackupManager: ObservableObject {
 
     /// Build a composite error string combining stderr tail and diagnostic hint.
     private static func composeFailureMessage(primary: String, stderr: String) -> String {
+        let failure = backupFailure(primary: primary, stderr: stderr)
+        return [failure.title, failure.message, failure.technicalDetails.map { "Details:\n\($0)" }]
+            .compactMap { $0 }
+            .joined(separator: "\n\n")
+    }
+
+    private static func backupFailure(primary: String, stderr: String) -> BackupFailure {
         let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-        let hint = diagnosticHint(for: trimmed)
+        let diagnostic = diagnostic(for: trimmed)
         var lines: [String] = [primary]
-        if let hint { lines.append(hint) }
-        if !trimmed.isEmpty {
-            let tail = trimmed
-                .components(separatedBy: "\n")
-                .suffix(stderrTailLineLimit)
-                .joined(separator: "\n")
-            lines.append("Details:\n\(tail)")
-        }
-        return lines.joined(separator: "\n\n")
+        if let hint = diagnostic.hint { lines.append(hint) }
+        let tail = trimmed.isEmpty ? nil : trimmed
+            .components(separatedBy: "\n")
+            .suffix(stderrTailLineLimit)
+            .joined(separator: "\n")
+        return BackupFailure(
+            title: "Backup Failed",
+            message: lines.joined(separator: "\n\n"),
+            technicalDetails: tail,
+            recoveryAction: diagnostic.action
+        )
     }
 
     /// Phosphor's default backup location: inside ~/Documents so no special permission
@@ -262,13 +293,34 @@ final class BackupManager: ObservableObject {
                (fm.fileExists(atPath: manifestPlist) || fm.fileExists(atPath: manifestDb))
     }
 
+    static func backupPath(for udid: String, in directory: String? = nil) -> String {
+        let rootDirectory = directory ?? activeBackupDir
+        return (rootDirectory as NSString).appendingPathComponent(udid)
+    }
+
+    /// Check whether a device has complete backup metadata, no backup folder,
+    /// or an interrupted partial folder that should be cleaned up before retry.
+    static func backupMetadataHealth(for udid: String, in directory: String? = nil) -> BackupMetadataHealth {
+        let deviceDirectory = backupPath(for: udid, in: directory)
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: deviceDirectory, isDirectory: &isDir) else {
+            return .missing
+        }
+        guard isDir.boolValue else { return .incomplete(path: deviceDirectory) }
+        return looksLikeBackupFolder(deviceDirectory) ? .complete : .incomplete(path: deviceDirectory)
+    }
+
     /// Incremental backups require an existing valid backup metadata folder for
     /// the target UDID. If the folder is missing or partially-created, both
     /// backup backends fail with low-level MBErrorDomain/205 plist errors.
     static func hasExistingBackup(for udid: String, in directory: String? = nil) -> Bool {
-        let rootDirectory = directory ?? activeBackupDir
-        let deviceDirectory = (rootDirectory as NSString).appendingPathComponent(udid)
-        return looksLikeBackupFolder(deviceDirectory)
+        backupMetadataHealth(for: udid, in: directory) == .complete
+    }
+
+    static func deleteIncompleteBackup(for udid: String, in directory: String? = nil) throws {
+        guard case .incomplete(let path) = backupMetadataHealth(for: udid, in: directory) else { return }
+        try FileManager.default.removeItem(atPath: path)
     }
 
     // MARK: - Backup Creation
@@ -284,6 +336,7 @@ final class BackupManager: ObservableObject {
         backupProgress = "Starting backup..."
         backupPercent = 0
         lastError = nil
+        lastBackupFailure = nil
 
         // Preflight: bail early with a clear message when the directory is unreadable
         // (most commonly a Full Disk Access grant missing on the default location).
@@ -292,7 +345,27 @@ final class BackupManager: ObservableObject {
             isCreatingBackup = false
             backupProgress = "Backup failed"
             lastError = preflight.reason
+            lastBackupFailure = BackupFailure(
+                title: "Backup Folder Not Accessible",
+                message: preflight.reason ?? "Phosphor cannot read or write the selected backup folder.",
+                technicalDetails: Self.activeBackupDir,
+                recoveryAction: .openBackupSettings
+            )
             onProgress(preflight.reason ?? "Backup directory is not accessible.")
+            return false
+        }
+
+        if case .incomplete(let path) = Self.backupMetadataHealth(for: udid) {
+            isCreatingBackup = false
+            backupProgress = "Incomplete backup found"
+            lastBackupFailure = BackupFailure(
+                title: "Incomplete Backup Found",
+                message: "A previous backup for this device did not finish, so iOS may reject another backup in this folder. Delete the incomplete folder, then run a full backup again.",
+                technicalDetails: path,
+                recoveryAction: .deleteIncompleteAndRunFull
+            )
+            lastError = lastBackupFailure?.message
+            onProgress(lastError ?? "Incomplete backup found.")
             return false
         }
 
@@ -351,6 +424,11 @@ final class BackupManager: ObservableObject {
                                 .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
                                 .joined(separator: "\n---\n")
                             self.backupProgress = "Backup failed"
+                            let failure = Self.backupFailure(
+                                primary: "Both backup methods failed.",
+                                stderr: combinedStderr
+                            )
+                            self.lastBackupFailure = failure
                             self.lastError = Self.composeFailureMessage(
                                 primary: "Both backup methods failed.",
                                 stderr: combinedStderr
@@ -444,21 +522,49 @@ final class BackupManager: ObservableObject {
         backupProgress = "Starting incremental backup..."
         backupPercent = 0
         lastError = nil
+        lastBackupFailure = nil
 
         let preflight = Self.validateBackupDirectory(Self.activeBackupDir)
         if !preflight.ok {
             isCreatingBackup = false
             backupProgress = "Backup failed"
             lastError = preflight.reason
+            lastBackupFailure = BackupFailure(
+                title: "Backup Folder Not Accessible",
+                message: preflight.reason ?? "Phosphor cannot read or write the selected backup folder.",
+                technicalDetails: Self.activeBackupDir,
+                recoveryAction: .openBackupSettings
+            )
             onProgress(preflight.reason ?? "Backup directory is not accessible.")
             return false
         }
 
-        guard Self.hasExistingBackup(for: udid) else {
+        switch Self.backupMetadataHealth(for: udid) {
+        case .complete:
+            break
+        case .missing:
             isCreatingBackup = false
             backupProgress = "Backup needs a full backup first"
-            lastError = "No complete backup metadata exists for this device yet. Run a full backup first; future Wi-Fi backups can be incremental."
+            lastBackupFailure = BackupFailure(
+                title: "Full Backup Required",
+                message: "No complete backup exists for this device yet. Run a full backup first; future Wi-Fi backups can be incremental.",
+                technicalDetails: Self.backupPath(for: udid),
+                recoveryAction: .runFullBackup
+            )
+            lastError = lastBackupFailure?.message
             onProgress(lastError ?? "Run a full backup first.")
+            return false
+        case .incomplete(let path):
+            isCreatingBackup = false
+            backupProgress = "Incomplete backup found"
+            lastBackupFailure = BackupFailure(
+                title: "Incomplete Backup Found",
+                message: "A previous backup for this device did not finish. Delete the incomplete folder, then run a full backup again.",
+                technicalDetails: path,
+                recoveryAction: .deleteIncompleteAndRunFull
+            )
+            lastError = lastBackupFailure?.message
+            onProgress(lastError ?? "Incomplete backup found.")
             return false
         }
 
@@ -514,6 +620,11 @@ final class BackupManager: ObservableObject {
                                 .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
                                 .joined(separator: "\n---\n")
                             self.backupProgress = "Backup failed"
+                            let failure = Self.backupFailure(
+                                primary: "Incremental backup failed via both backends.",
+                                stderr: combinedStderr
+                            )
+                            self.lastBackupFailure = failure
                             self.lastError = Self.composeFailureMessage(
                                 primary: "Incremental backup failed via both backends.",
                                 stderr: combinedStderr
