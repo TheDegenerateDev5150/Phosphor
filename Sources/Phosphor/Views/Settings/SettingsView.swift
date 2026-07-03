@@ -169,8 +169,13 @@ struct SettingsView: View {
                         .frame(width: 100)
                     }
 
-                    Toggle("Wi-Fi backup only", isOn: $scheduler.schedule.wifiOnly)
-                    Toggle("Incremental backup (faster)", isOn: $scheduler.schedule.incrementalOnly)
+                    Toggle("Wi-Fi only (skip if Wi-Fi is not available)", isOn: $scheduler.schedule.wifiOnly)
+                    Toggle("Incremental when possible (faster)", isOn: $scheduler.schedule.incrementalOnly)
+                    if scheduler.schedule.incrementalOnly {
+                        Text("The first scheduled run will create the required full backup if this device does not already have complete backup metadata.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -202,6 +207,10 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .padding()
+        .onChange(of: scheduler.schedule.enabled) { _, _ in scheduler.updateNextRunDate() }
+        .onChange(of: scheduler.schedule.frequency) { _, _ in scheduler.updateNextRunDate() }
+        .onChange(of: scheduler.schedule.preferredHour) { _, _ in scheduler.updateNextRunDate() }
+        .onChange(of: scheduler.schedule.preferredMinute) { _, _ in scheduler.updateNextRunDate() }
     }
 
     // MARK: - Dependencies

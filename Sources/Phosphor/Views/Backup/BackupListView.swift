@@ -312,6 +312,7 @@ struct BackupListView: View {
             Task { await backupVM.runFullBackup(for: issue) }
         case .deleteIncompleteAndRunFull:
             pendingIncompleteBackupIssue = issue
+            backupVM.backupIssue = nil
             showIncompleteBackupTrashConfirm = true
         case .openBackupSettings:
             backupVM.backupIssue = nil
@@ -726,13 +727,9 @@ struct BackupScheduleSheet: View {
             }
             .formStyle(.grouped)
         }
-        .onChange(of: scheduler.schedule.enabled) { _, enabled in
-            if enabled {
-                scheduler.updateNextRunDate()
-                scheduler.startMonitoring()
-            } else {
-                scheduler.stopMonitoring()
-            }
-        }
+        .onChange(of: scheduler.schedule.enabled) { _, _ in scheduler.updateNextRunDate() }
+        .onChange(of: scheduler.schedule.frequency) { _, _ in scheduler.updateNextRunDate() }
+        .onChange(of: scheduler.schedule.preferredHour) { _, _ in scheduler.updateNextRunDate() }
+        .onChange(of: scheduler.schedule.preferredMinute) { _, _ in scheduler.updateNextRunDate() }
     }
 }

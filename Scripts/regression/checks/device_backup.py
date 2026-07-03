@@ -85,11 +85,21 @@ def test_wifi_schedules_use_network_discovery_and_network_backup_flag(root: Path
     assert_contains(scheduler, "createBackup(udid: udid, preferNetwork: preferNetwork)", "scheduled full backups should preserve network preference")
     assert_contains(scheduler, "schedule.incrementalOnly && BackupManager.hasExistingBackup(for: udid)", "Scheduled incremental mode should run the required first full backup when metadata is missing")
     assert_contains(scheduler, "running required first full backup", "Scheduled first-full fallback should be logged clearly")
+    assert_contains(scheduler, "able to notice a schedule that is enabled after launch", "App-level scheduler should keep monitoring so schedules enabled after launch can run")
+    assert_contains(scheduler, "if schedule.nextRunDate == nil { updateNextRunDate() }", "Scheduler should initialize next run when a separate UI instance enables the schedule")
+    assert_contains(scheduler, "func runNow() async {\n        guard !isRunningScheduledBackup else { return }\n        isRunningScheduledBackup = true", "Run Now should set the running guard before async device discovery")
 
     view = read(root, "Sources/Phosphor/Views/Backup/BackupListView.swift")
     assert_contains(view, "Wi-Fi only (skip if Wi-Fi is not available)", "Wi-Fi-only schedule copy should not say USB is required")
     assert_contains(view, "Incremental when possible (faster)", "Schedule copy should not promise incremental-only behavior when first run may be full")
     assert_contains(view, "first scheduled run will create the required full backup", "Schedule UI should explain first-run behavior for incremental mode")
+    assert_not_contains(view, "scheduler.startMonitoring()", "Schedule sheets should not start duplicate schedulers separate from the app-level monitor")
+    assert_contains(view, ".onChange(of: scheduler.schedule.preferredHour)", "Schedule sheet should refresh next-run timing when preferred time changes")
+
+    settings = read(root, "Sources/Phosphor/Views/Settings/SettingsView.swift")
+    assert_contains(settings, "Wi-Fi only (skip if Wi-Fi is not available)", "Settings schedule copy should match the safer schedule sheet copy")
+    assert_contains(settings, "Incremental when possible (faster)", "Settings should not promise incremental-only behavior when first run may be full")
+    assert_contains(settings, ".onChange(of: scheduler.schedule.preferredHour)", "Settings should refresh next-run timing when preferred time changes")
 
 
 def test_incremental_backups_require_existing_metadata(root: Path) -> None:
@@ -138,6 +148,7 @@ def test_backup_failures_have_recovery_actions_and_collapsed_details(root: Path)
     assert_contains(view, "handleBackupIssueAction(_ issue", "Backup recovery actions should receive the full failed issue context")
     assert_contains(view, "Move Incomplete Backup to Trash?", "Destructive incomplete-backup recovery should require explicit confirmation")
     assert_contains(view, "incompleteBackupTrashConfirmationMessage", "Incomplete-backup confirmation should show the exact path before moving it")
+    assert_contains(view, "pendingIncompleteBackupIssue = issue\n            backupVM.backupIssue = nil\n            showIncompleteBackupTrashConfirm = true", "Incomplete-backup confirmation should dismiss the issue sheet before presenting the destructive confirmation")
     assert_contains(view, "DisclosureGroup(\"Technical details\"", "Technical details should be collapsed by default")
     assert_contains(view, "Delete Incomplete Backup & Run Full", "Incomplete backup failures should offer a recovery action")
     assert_contains(view, "Open Backup Settings", "Permission/folder failures should offer a settings action")
@@ -154,3 +165,15 @@ def test_idevicebackup2_network_argument_order_is_before_backup_subcommand(root:
     assert_contains(body, 'var args = ["-u", udid]', "idevicebackup2 should start with the target UDID")
     assert body.index('if preferNetwork { args.append("-n") }') < body.index('args.append("backup")'), "idevicebackup2 -n must come before backup subcommand"
     assert body.index('args.append("backup")') < body.index('if full { args.append("--full") }'), "backup subcommand should come before --full"
+
+
+def test_phosphor_archive_import_uses_active_dir_and_rejects_unsafe_archives(root: Path) -> None:
+    archiver = read(root, "Sources/Phosphor/Services/BackupArchiver.swift")
+    assert_contains(archiver, "MainActor.run { BackupManager.activeBackupDir }", "Archive import should use Phosphor's active backup directory, not Apple's protected MobileSync default")
+    assert_contains(archiver, "archiveEntryIsSafe", "Archive import should validate tar entries before extraction")
+    assert_contains(archiver, "guard !entry.hasPrefix(\"/\")", "Archive import should reject absolute tar paths")
+    assert_contains(archiver, "!components.contains(\"..\")", "Archive import should reject parent-directory traversal entries")
+    assert_contains(archiver, "topLevelEntries(in: entries).intersection(existingDirs)", "Archive import should not overwrite an existing backup directory")
+    assert_contains(archiver, "looksLikeBackupFolder(itemPath)", "Archive import should only report complete backup folders as imported")
+    assert_contains(archiver, "moveImportedEntriesToTrash", "Failed archive imports should clean up newly extracted entries")
+    assert_contains(archiver, "archive did not contain a complete iOS backup", "Invalid safe archives should fail with a clear reason")
