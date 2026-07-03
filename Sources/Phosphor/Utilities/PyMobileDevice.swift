@@ -229,7 +229,7 @@ enum PyMobileDevice {
         let udid: String
         let connectionType: String // "USB" or "Network"
         let discoveryMethod: String
-        let discoveryInfo: [String: String]
+        var discoveryInfo: [String: String]
 
         init(
             udid: String,
@@ -279,28 +279,24 @@ enum PyMobileDevice {
             }
         }
 
-        if entries.isEmpty {
-            entries = await listMobdev2DeviceEntries()
-        }
-
         return mergeDeviceEntries(entries)
     }
 
     /// List devices currently reachable over network/Wi-Fi with connection metadata.
     static func listNetworkDeviceEntries() async -> [DeviceEntry] {
         let result = await runAsync(["usbmux", "list", "--network"], timeout: 10)
-        let entries = result.succeeded
-            ? parseUsbmuxDeviceEntries(from: result.output, defaultConnectionType: "Network")
-            : []
-        return entries.isEmpty ? await listMobdev2DeviceEntries() : entries
+        guard result.succeeded else { return [] }
+        return parseUsbmuxDeviceEntries(from: result.output, defaultConnectionType: "Network")
     }
 
     /// List devices advertised by pymobiledevice3's mobdev2 Bonjour backend.
     ///
     /// This is the closest CLI path to Finder's wireless discovery on current
     /// iOS/macOS releases. Unlike raw dns-sd TXT identifiers, mobdev2 returns
-    /// the real `UniqueDeviceID`, so Phosphor can present the device and try
-    /// pymobiledevice3 operations with `--mobdev2`.
+    /// the real `UniqueDeviceID`, but it is still a discovery hint: current
+    /// pymobiledevice3 backup commands may prompt when the same device is
+    /// advertised on several addresses, which is unsafe in Phosphor's non-TTY
+    /// process runner.
     static func listMobdev2DeviceEntries() async -> [DeviceEntry] {
         let result = await runAsync(["bonjour", "mobdev2", "--timeout", "3"], timeout: 6)
         guard result.succeeded else { return [] }
@@ -314,6 +310,18 @@ enum PyMobileDevice {
     /// entries are discovery hints only; callers should not treat them as backup
     /// targets because the Bonjour TXT identifier is not the device UDID.
     static func listBonjourMobileDevices(timeout: TimeInterval = 3) async -> [BonjourDevice] {
+        let mobdev2Devices = await listMobdev2DeviceEntries()
+        if !mobdev2Devices.isEmpty {
+            return mobdev2Devices.map { entry in
+                BonjourDevice(
+                    id: entry.udid,
+                    name: entry.discoveryInfo["DeviceName"] ?? "Wireless iPhone/iPad",
+                    host: entry.discoveryInfo["ip"] ?? entry.discoveryInfo["Identifier"],
+                    serviceName: "mobdev2"
+                )
+            }
+        }
+
         let browse = await Shell.runAsync(
             "/usr/bin/dns-sd",
             arguments: ["-B", "_apple-mobdev2._tcp", "local"],
@@ -389,8 +397,6 @@ enum PyMobileDevice {
         var orderedUdids: [String] = []
         for entry in json {
             guard let udid = entry["UniqueDeviceID"] as? String else { continue }
-            if byUdid[udid] == nil { orderedUdids.append(udid) }
-
             var info: [String: String] = [:]
             for (key, value) in entry {
                 if let string = value as? String {
@@ -399,6 +405,16 @@ enum PyMobileDevice {
                     info[key] = "\(number)"
                 }
             }
+
+            if var existing = byUdid[udid] {
+                for (key, value) in info where existing.discoveryInfo[key] == nil {
+                    existing.discoveryInfo[key] = value
+                }
+                byUdid[udid] = existing
+                continue
+            }
+
+            orderedUdids.append(udid)
 
             byUdid[udid] = DeviceEntry(
                 udid: udid,
@@ -722,7 +738,11 @@ enum PyMobileDevice {
     ) -> Process? {
         var args = ["backup2", "backup"]
         if full { args.append("--full") }
-        if preferNetwork { args.append("--mobdev2") }
+        // `--mobdev2` can prompt when the same wireless device is advertised on
+        // multiple addresses, which crashes in Phosphor's non-interactive
+        // Process runner. For Wi-Fi backups, let the libimobiledevice fallback
+        // use `idevicebackup2 -n` instead of invoking an interactive CLI path.
+        _ = preferNetwork
         if let udid { args += ["--udid", udid] }
         args.append(directory)
 
