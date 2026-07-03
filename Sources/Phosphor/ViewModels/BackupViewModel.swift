@@ -141,8 +141,18 @@ final class BackupViewModel: ObservableObject {
 
     // MARK: - Browsing
 
+    private func clearBrowserState() {
+        selectedBackup = nil
+        currentManifest = nil
+        browserDomains = []
+        browserFiles = []
+        currentDomain = nil
+        searchQuery = ""
+        searchResults = []
+    }
+
     func openBackupBrowser(_ backup: BackupInfo) {
-        selectedBackup = backup
+        clearBrowserState()
         currentManifest = backupManager.openManifest(for: backup)
 
         guard let manifest = currentManifest else {
@@ -154,7 +164,9 @@ final class BackupViewModel: ObservableObject {
 
         do {
             browserDomains = try manifest.domains()
+            selectedBackup = backup
         } catch {
+            clearBrowserState()
             alertMessage = "Failed to read backup: \(error.localizedDescription)"
             showAlert = true
         }

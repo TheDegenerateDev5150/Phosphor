@@ -262,7 +262,7 @@ struct BackupListView: View {
     }
 
     private func shouldOfferIncremental(for device: DeviceInfo) -> Bool {
-        backupVM.backups.contains { backup in
+        BackupManager.hasExistingBackup(for: device.id) && backupVM.backups.contains { backup in
             backup.udid == device.id || backup.id == device.id
         }
     }
@@ -640,8 +640,13 @@ struct BackupScheduleSheet: View {
                             .frame(width: 100)
                         }
 
-                        Toggle("Wi-Fi only (skip if USB not available)", isOn: $scheduler.schedule.wifiOnly)
+                        Toggle("Wi-Fi only (skip if Wi-Fi is not available)", isOn: $scheduler.schedule.wifiOnly)
                         Toggle("Incremental only (faster)", isOn: $scheduler.schedule.incrementalOnly)
+                        if scheduler.schedule.incrementalOnly {
+                            Text("The first scheduled run will create the required full backup if this device does not already have complete backup metadata.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
 

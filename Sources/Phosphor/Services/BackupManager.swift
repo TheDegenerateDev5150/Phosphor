@@ -235,8 +235,7 @@ final class BackupManager: ObservableObject {
         // Single-backup case: the chosen dir is itself a UDID backup folder
         // (contains Info.plist + Manifest.* at its root). Common when a user
         // points the picker at an individual backup rather than its parent.
-        let rootInfoPlist = (dir as NSString).appendingPathComponent("Info.plist")
-        if fm.fileExists(atPath: rootInfoPlist),
+        if Self.looksLikeBackupFolder(dir),
            let single = BackupInfo.fromDirectory(dir, includeSize: false) {
             backups = [single]
             lastError = nil
@@ -271,8 +270,7 @@ final class BackupManager: ObservableObject {
             var itemIsDir: ObjCBool = false
             guard fm.fileExists(atPath: fullPath, isDirectory: &itemIsDir), itemIsDir.boolValue else { continue }
 
-            let infoPlist = (fullPath as NSString).appendingPathComponent("Info.plist")
-            guard fm.fileExists(atPath: infoPlist) else { continue }
+            guard Self.looksLikeBackupFolder(fullPath) else { continue }
 
             if let backup = BackupInfo.fromDirectory(fullPath, includeSize: false) {
                 discovered.append(backup)
