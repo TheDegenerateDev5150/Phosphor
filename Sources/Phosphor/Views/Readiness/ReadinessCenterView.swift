@@ -3,7 +3,10 @@ import SwiftUI
 
 struct ReadinessCenterView: View {
     @EnvironmentObject var deviceVM: DeviceViewModel
+    @EnvironmentObject var backupVM: BackupViewModel
     @State private var exportMessage: String?
+    @State private var recoveryMessage: String?
+    @State private var pendingRecovery: PendingReadinessRecovery?
 
     var body: some View {
         ScrollView {
@@ -31,6 +34,10 @@ struct ReadinessCenterView: View {
 
                     SectionBlock(title: "Backup Folder", systemImage: "externaldrive.fill") {
                         readinessRows(report.items.filter { $0.title.contains("Backup Folder") })
+                    }
+
+                    SectionBlock(title: "Backup Recovery", systemImage: "externaldrive.badge.exclamationmark") {
+                        readinessRows(report.items.filter { $0.title.contains("Incomplete Backup") })
                     }
 
                     SectionBlock(title: "Device Visibility", systemImage: "iphone.gen3") {
@@ -77,6 +84,12 @@ struct ReadinessCenterView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+
+                if let recoveryMessage {
+                    Text(recoveryMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(28)
             .frame(maxWidth: 900, alignment: .leading)
@@ -86,6 +99,16 @@ struct ReadinessCenterView: View {
             if deviceVM.readinessReport == nil {
                 await deviceVM.refreshReadiness()
             }
+        }
+        .alert(item: $pendingRecovery) { recovery in
+            Alert(
+                title: Text("Move Incomplete Backup to Trash?"),
+                message: Text(recovery.confirmationMessage),
+                primaryButton: .destructive(Text("Move to Trash")) {
+                    Task { await performRecovery(recovery.operation) }
+                },
+                secondaryButton: .cancel()
+            )
         }
     }
 
@@ -130,7 +153,36 @@ struct ReadinessCenterView: View {
     private func readinessRows(_ items: [ReadinessItem]) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             ForEach(items) { item in
-                ReadinessRow(item: item)
+                ReadinessRow(item: item) { operation in
+                    pendingRecovery = PendingReadinessRecovery(operation: operation)
+                }
+            }
+        }
+    }
+
+    private func performRecovery(_ operation: ReadinessOperation) async {
+        switch operation {
+        case .deleteIncompleteBackupAndRunFull(let udid, let path):
+            do {
+                try BackupManager.deleteIncompleteBackup(for: udid, expectedPath: path)
+                backupVM.loadBackups()
+                await deviceVM.refreshReadiness()
+
+                guard let device = deviceVM.devices.first(where: { $0.id == udid }) else {
+                    recoveryMessage = "Moved incomplete backup to Trash. Reconnect and trust the device over USB, then run a full backup."
+                    return
+                }
+
+                guard device.connectionType == .usb else {
+                    recoveryMessage = "Moved incomplete backup to Trash. Open Backups to explicitly confirm the first full Wi-Fi backup, or connect over USB for the recommended first backup."
+                    return
+                }
+
+                recoveryMessage = "Moved incomplete backup to Trash. Starting a fresh full USB backup…"
+                await backupVM.createBackup(udid: udid, incremental: false, preferNetwork: false)
+                await deviceVM.refreshReadiness()
+            } catch {
+                recoveryMessage = "Could not move incomplete backup to Trash: \(error.localizedDescription)"
             }
         }
     }
@@ -177,6 +229,7 @@ private struct SectionBlock<Content: View>: View {
 
 private struct ReadinessRow: View {
     let item: ReadinessItem
+    let actionHandler: (ReadinessOperation) -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -203,6 +256,15 @@ private struct ReadinessRow: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+                if let operation = item.operation {
+                    Button {
+                        actionHandler(operation)
+                    } label: {
+                        Label("Move Incomplete Backup to Trash", systemImage: "trash")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
             }
             Spacer()
         }
@@ -227,9 +289,22 @@ private struct ReadinessRow: View {
     }
 }
 
+private struct PendingReadinessRecovery: Identifiable {
+    let id = UUID()
+    let operation: ReadinessOperation
+
+    var confirmationMessage: String {
+        switch operation {
+        case .deleteIncompleteBackupAndRunFull(_, let path):
+            return "This will move the incomplete backup folder to Trash, not permanently delete it:\n\n\(path)\n\nIf the matching device is connected over USB, Phosphor will start a fresh full backup afterward."
+        }
+    }
+}
+
 #if canImport(PreviewsMacros)
 #Preview {
     ReadinessCenterView()
         .environmentObject(DeviceViewModel())
+        .environmentObject(BackupViewModel())
 }
 #endif

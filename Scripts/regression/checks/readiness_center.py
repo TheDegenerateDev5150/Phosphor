@@ -13,6 +13,7 @@ def test_readiness_service_contract(root: Path) -> None:
     src = path.read_text()
     for token in [
         "enum ReadinessStatus",
+        "enum ReadinessOperation",
         "struct ReadinessItem",
         "struct ReadinessReport",
         "enum ReadinessService",
@@ -79,5 +80,19 @@ def test_readiness_center_visible_in_navigation(root: Path) -> None:
         "Safe Operations",
         "Diagnostic Report",
         "Next Steps",
+        "Backup Recovery",
     ]:
         assert phrase in view_src, f"Readiness center missing user-facing section: {phrase}"
+
+
+def test_readiness_center_incomplete_backup_recovery_action(root: Path) -> None:
+    service = read(root, "Sources/Phosphor/Services/ReadinessService.swift")
+    view = read(root, "Sources/Phosphor/Views/Readiness/ReadinessCenterView.swift")
+    assert "enum ReadinessOperation" in service, "readiness rows should carry confirmable recovery operations"
+    assert "incompleteBackupItems" in service, "readiness should detect incomplete backup folders"
+    assert "BackupManager.incompleteBackupHasKnownMarkers" in service, "incomplete detection should only flag recognizable iOS backup folders"
+    assert "deleteIncompleteBackupAndRunFull" in service, "incomplete backup rows should offer a recovery operation"
+    assert "pendingRecovery" in view, "readiness recovery should require a confirmation alert"
+    assert "Move Incomplete Backup to Trash" in view, "readiness center should expose the cleanup action"
+    assert "BackupManager.deleteIncompleteBackup" in view, "cleanup should use the guarded BackupManager trash flow"
+    assert "device.connectionType == .usb" in view, "readiness should auto-start full backup only on USB"

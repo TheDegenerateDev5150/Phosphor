@@ -8,6 +8,11 @@ enum ReadinessStatus: String {
     case info = "Info"
 }
 
+/// Recovery operation that can be launched directly from a readiness row after user confirmation.
+enum ReadinessOperation: Hashable {
+    case deleteIncompleteBackupAndRunFull(udid: String, path: String)
+}
+
 /// One actionable readiness row shown in the Readiness Center and diagnostic report.
 struct ReadinessItem: Identifiable, Hashable {
     let id = UUID()
@@ -16,19 +21,22 @@ struct ReadinessItem: Identifiable, Hashable {
     let status: ReadinessStatus
     let recoveryAction: String?
     let technicalDetail: String?
+    let operation: ReadinessOperation?
 
     init(
         title: String,
         detail: String,
         status: ReadinessStatus,
         recoveryAction: String? = nil,
-        technicalDetail: String? = nil
+        technicalDetail: String? = nil,
+        operation: ReadinessOperation? = nil
     ) {
         self.title = title
         self.detail = detail
         self.status = status
         self.recoveryAction = recoveryAction
         self.technicalDetail = technicalDetail
+        self.operation = operation
     }
 }
 
@@ -130,6 +138,7 @@ enum ReadinessService {
             ))
         }
 
+        items.append(contentsOf: incompleteBackupItems(in: backupDirectory, devices: devices))
         items.append(deviceVisibilityItem(devices: devices, nearbyWirelessDevices: nearbyWirelessDevices))
         items.append(wifiBackupItem(devices: devices, nearbyWirelessDevices: nearbyWirelessDevices))
         items.append(ReadinessItem(
@@ -206,6 +215,35 @@ enum ReadinessService {
             recoveryAction: "Open Settings and choose a user-owned local backup folder such as ~/Documents/Phosphor Backups.",
             technicalDetail: path
         )
+    }
+
+    @MainActor
+    private static func incompleteBackupItems(in directory: String, devices: [DeviceInfo]) -> [ReadinessItem] {
+        var candidates = Set(devices.map(\.id))
+        let fm = FileManager.default
+        let childNames = (try? fm.contentsOfDirectory(atPath: directory)) ?? []
+        for childName in childNames {
+            let childPath = (directory as NSString).appendingPathComponent(childName)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: childPath, isDirectory: &isDir), isDir.boolValue else { continue }
+            guard BackupManager.incompleteBackupHasKnownMarkers(childPath) else { continue }
+            candidates.insert(childName)
+        }
+
+        return candidates.compactMap { udid in
+            guard case .incomplete(let path) = BackupManager.backupMetadataHealth(for: udid, in: directory) else {
+                return nil
+            }
+            return ReadinessItem(
+                title: "Incomplete Backup Found",
+                detail: "A previous backup for this device did not finish, so iOS may reject another backup in this folder.",
+                status: .blocked,
+                recoveryAction: "Move the incomplete folder to Trash, then run a fresh full backup with the device unlocked and connected over USB when possible.",
+                technicalDetail: path,
+                operation: .deleteIncompleteBackupAndRunFull(udid: udid, path: path)
+            )
+        }
+        .sorted { ($0.technicalDetail ?? $0.title) < ($1.technicalDetail ?? $1.title) }
     }
 
     private static func deviceVisibilityItem(
