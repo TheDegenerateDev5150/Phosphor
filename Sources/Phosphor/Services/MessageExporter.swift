@@ -579,29 +579,31 @@ final class MessageExporter {
 
     private func exportPDF(messages: [Message], chatTitle: String, to path: String, includeAttachments: Bool = true, cancellationCheck: (() throws -> Void)? = nil) throws {
         let entries = messages.map { msg -> PDFTranscriptWriter.Entry in
-            var body = msg.text ?? ""
-            if let link = msg.linkURL, !link.isEmpty {
-                if !body.isEmpty { body += "\n\n" }
-                body += "Link: \(link)"
+            let visibleAttachments = includeAttachments ? msg.attachments.filter { !$0.isPluginPayload } : []
+            let body = (msg.text?.isEmpty == false) ? (msg.text ?? "") : msg.displayText
+            let reactionBadges = msg.reactions.map { reaction in
+                "\(reaction.type.emoji) \(reaction.sender) \(reaction.type.label.lowercased())"
             }
-            if includeAttachments {
-                let attachments = msg.attachments.filter { !$0.isPluginPayload }
-                if !attachments.isEmpty {
-                    if !body.isEmpty { body += "\n\n" }
-                    body += attachments.map { "Attachment: \($0.displayName)" }.joined(separator: "\n")
-                }
+            let attachmentSummaries = visibleAttachments.map { attachment in
+                var parts: [String] = [attachment.displayName]
+                if let mime = attachment.mimeType, !mime.isEmpty { parts.append(mime) }
+                if attachment.totalBytes > 0 { parts.append(ByteCountFormatter.string(fromByteCount: Int64(attachment.totalBytes), countStyle: .file)) }
+                return parts.joined(separator: " • ")
             }
-            if body.isEmpty { body = msg.displayText }
+            let statusParts = [
+                msg.service.isEmpty ? nil : msg.service,
+                msg.isFromMe ? nil : (msg.isRead ? "read" : "unread")
+            ].compactMap { $0 }
 
-            let reactions = msg.reactions
-                .map { "\($0.type.emoji) \($0.sender) \($0.type.label.lowercased())" }
-                .joined(separator: "; ")
-            let subtitle = reactions.isEmpty ? msg.formattedDate : "\(msg.formattedDate) • \(reactions)"
             return PDFTranscriptWriter.Entry(
                 title: msg.senderLabel,
-                subtitle: subtitle,
+                subtitle: msg.formattedDate,
                 body: body,
-                isFromMe: msg.isFromMe
+                isFromMe: msg.isFromMe,
+                reactions: reactionBadges,
+                attachments: attachmentSummaries,
+                linkURL: msg.linkURL,
+                status: statusParts.isEmpty ? nil : statusParts.joined(separator: " • ")
             )
         }
 

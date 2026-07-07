@@ -42,6 +42,13 @@ def test_message_pdf_export_is_registered_and_uses_native_pdf_writer(root: Path)
     assert_contains(writer, "CGPath(roundedRect:", "PDF writer should render rounded iMessage-style bubbles")
     assert_contains(writer, "outgoingBubbleColor", "PDF writer should distinguish outgoing blue bubbles")
     assert_contains(writer, "incomingBubbleColor", "PDF writer should distinguish incoming gray bubbles")
+    assert_contains(writer, "drawReactionBadge", "PDF writer should render tapbacks/reactions as visible badges")
+    assert_contains(writer, "Tapbacks:", "PDF writer should preserve reaction details as readable transcript text")
+    assert_contains(writer, "drawFeaturePill", "PDF writer should render links, attachments, and status as iMessage feature pills")
+    assert_contains(exporter, "reactions: reactionBadges", "PDF export should pass iMessage tapbacks into the PDF writer")
+    assert_contains(exporter, "attachments: attachmentSummaries", "PDF export should pass attachment metadata into the PDF writer")
+    assert_contains(exporter, "linkURL: msg.linkURL", "PDF export should pass rich-link URLs into the PDF writer")
+    assert_contains(exporter, "status: statusParts.isEmpty ? nil", "PDF export should pass service/read status into the PDF writer")
     assert_contains(writer, "entry.isFromMe ? margin + contentWidth - bubbleWidth : margin", "PDF writer should right-align outgoing bubbles and left-align incoming bubbles")
 
 
