@@ -536,6 +536,7 @@ private extension MessageExportFormat {
         switch self {
         case .csv: return .commaSeparatedText
         case .txt: return .plainText
+        case .pdf: return .pdf
         case .html: return .html
         case .json: return .json
         case .mbox: return UTType(filenameExtension: "mbox") ?? .data

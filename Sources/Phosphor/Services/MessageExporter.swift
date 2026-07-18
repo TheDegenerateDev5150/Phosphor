@@ -223,7 +223,11 @@ final class MessageExporter {
             "m.service", "m.cache_has_attachments", "m.is_read",
             "COALESCE(h.id, '') as handle_id"
         ]
-        for opt in ["associated_message_type", "associated_message_guid", "balloon_bundle_id", "payload_data"] {
+        for opt in [
+            "associated_message_type", "associated_message_guid", "balloon_bundle_id", "payload_data",
+            "reply_to_guid", "thread_originator_guid", "thread_originator_part", "expressive_send_style_id",
+            "associated_message_emoji"
+        ] {
             if messageColumns.contains(opt) {
                 fields.append("m.\(opt)")
             }
@@ -520,6 +524,8 @@ final class MessageExporter {
             try exportCSV(messages: messages, chatTitle: chatTitle, to: path, cancellationCheck: cancellationCheck)
         case .txt:
             try exportPlainText(messages: messages, chatTitle: chatTitle, to: path, cancellationCheck: cancellationCheck)
+        case .pdf:
+            try exportPDF(messages: messages, chatTitle: chatTitle, to: path, includeAttachments: options.includeAttachments)
         case .html:
             try exportHTML(messages: messages, chatTitle: chatTitle, to: path, includeAttachments: options.includeAttachments, cancellationCheck: cancellationCheck)
         case .json:
@@ -595,6 +601,69 @@ final class MessageExporter {
             }
             try append("\n")
         }
+    }
+
+    private func exportPDF(messages: [Message], chatTitle: String, to path: String, includeAttachments: Bool = true, cancellationCheck: (() throws -> Void)? = nil) throws {
+        // GUIDs come from the untrusted sms.db; a corrupted or merged backup can
+        // repeat one. Keep the first occurrence instead of trapping on duplicates.
+        let messagesByGuid = Dictionary(messages.map { ($0.guid, $0) }, uniquingKeysWith: { first, _ in first })
+
+        func replyTargetGuid(for message: Message) -> String? {
+            let candidates = [message.replyToGuid, message.threadOriginatorGuid]
+            for raw in candidates.compactMap({ $0 }) {
+                let target = Self.stripReactionGuidPrefix(raw)
+                if !target.isEmpty && target != message.guid { return target }
+            }
+            return nil
+        }
+
+        func replyPreview(for message: Message) -> String? {
+            guard let targetGuid = replyTargetGuid(for: message) else { return nil }
+            let part = message.threadOriginatorPart.map { " part \($0)" } ?? ""
+            guard let target = messagesByGuid[targetGuid] else {
+                return "original message\(part)"
+            }
+            var preview = target.displayText.replacingOccurrences(of: "\n", with: " ")
+            if preview.count > 90 { preview = String(preview.prefix(90)) + "…" }
+            return "\(target.senderLabel): \(preview)\(part)"
+        }
+
+        let entries = messages.map { msg -> PDFTranscriptWriter.Entry in
+            let visibleAttachments = includeAttachments ? msg.attachments.filter { !$0.isPluginPayload } : []
+            let body = (msg.text?.isEmpty == false) ? (msg.text ?? "") : msg.displayText
+            let reactionBadges = msg.reactions.map { $0.type.emoji }
+            let attachmentSummaries = visibleAttachments.map { attachment in
+                var parts: [String] = [attachment.displayName]
+                if let mime = attachment.mimeType, !mime.isEmpty { parts.append(mime) }
+                if attachment.totalBytes > 0 { parts.append(ByteCountFormatter.string(fromByteCount: Int64(attachment.totalBytes), countStyle: .file)) }
+                return parts.joined(separator: " • ")
+            }
+            // Keep PDF exports conversation-like: don't print "iMessage" or
+            // read/unread under every bubble. Surface the service only when it
+            // differs from iMessage, where it helps explain SMS/MMS fallback.
+            let serviceStatus = msg.service.isEmpty || msg.service.lowercased() == "imessage" ? nil : msg.service
+            let statusParts = [serviceStatus].compactMap { $0 }
+
+            return PDFTranscriptWriter.Entry(
+                title: msg.senderLabel,
+                subtitle: msg.formattedDate,
+                body: body,
+                isFromMe: msg.isFromMe,
+                reactions: reactionBadges,
+                inlineReply: replyPreview(for: msg),
+                attachments: attachmentSummaries,
+                linkURL: msg.linkURL,
+                status: statusParts.isEmpty ? nil : statusParts.joined(separator: " • ")
+            )
+        }
+
+        try PDFTranscriptWriter.write(
+            title: chatTitle,
+            subtitle: "Exported by Phosphor • \(Date().shortString) • \(messages.count) messages",
+            entries: entries,
+            to: path,
+            cancellationCheck: cancellationCheck
+        )
     }
 
     /// Copy referenced attachments into a sibling `<export>_attachments` folder so the
@@ -999,6 +1068,9 @@ final class MessageExporter {
                 },
                 "reactions": msg.reactions.map { ["sender": $0.sender, "type": $0.type.label, "emoji": $0.type.emoji] }
             ]
+            if let replyToGuid = msg.replyToGuid { entry["reply_to_guid"] = replyToGuid }
+            if let threadOriginatorGuid = msg.threadOriginatorGuid { entry["thread_originator_guid"] = threadOriginatorGuid }
+            if let threadOriginatorPart = msg.threadOriginatorPart { entry["thread_originator_part"] = threadOriginatorPart }
             if let link = msg.linkURL { entry["link_url"] = link }
             if index > 0 { try append(",\n") }
             try append("    " + jsonObjectString(entry))
@@ -1069,6 +1141,9 @@ final class MessageExporter {
             attachments: visibleAttachments,
             isRead: (row["is_read"] as? Int) == 1,
             reactions: reactions,
+            replyToGuid: row["reply_to_guid"] as? String,
+            threadOriginatorGuid: row["thread_originator_guid"] as? String,
+            threadOriginatorPart: row["thread_originator_part"] as? String,
             linkURL: linkURL,
             balloonBundleID: balloonBundle
         )

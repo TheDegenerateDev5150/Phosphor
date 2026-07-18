@@ -26,5 +26,5 @@ def test_key_source_files_exist(root: Path) -> None:
 
 def test_message_export_formats_are_registered(root: Path) -> None:
     src = read(root, "Sources/Phosphor/Models/Message.swift")
-    for case in ["csv", "txt", "html", "json", "mbox"]:
+    for case in ["csv", "txt", "pdf", "html", "json", "mbox"]:
         assert f"case {case}" in src, f"MessageExportFormat missing {case}"

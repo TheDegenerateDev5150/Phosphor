@@ -25,6 +25,37 @@ def test_streaming_exports_truncate_before_write(root: Path) -> None:
         assert_contains(body, "FileHandle(forWritingTo: outputURL)", f"{func_name} must stream through FileHandle")
 
 
+def test_message_pdf_export_is_registered_and_uses_native_pdf_writer(root: Path) -> None:
+    model = read(root, "Sources/Phosphor/Models/Message.swift")
+    exporter = read(root, "Sources/Phosphor/Services/MessageExporter.swift")
+    wa = read(root, "Sources/Phosphor/Services/WhatsAppExporter.swift")
+    view = read(root, "Sources/Phosphor/Views/Messages/MessageListView.swift")
+    writer = read(root, "Sources/Phosphor/Utilities/PDFTranscriptWriter.swift")
+    assert_contains(model, "case pdf = \"PDF\"", "Message export formats should include PDF")
+    assert_contains(model, "case .pdf: return \"pdf\"", "PDF exports should use .pdf filenames")
+    assert_contains(view, "case .pdf: return .pdf", "Save panels should advertise the PDF content type")
+    assert_contains(exporter, "case .pdf:", "iMessage exporter should dispatch PDF exports")
+    assert_contains(exporter, "try exportPDF", "iMessage exporter should call a PDF writer")
+    assert_contains(wa, "case .pdf:", "WhatsApp exporter should handle the shared PDF format")
+    assert_contains(writer, "CGContext(consumer: consumer, mediaBox:", "PDF writer should render native PDF output")
+    assert_contains(writer, "CTFramesetterCreateWithAttributedString", "PDF writer should measure and wrap text")
+    assert_contains(writer, "CGPath(roundedRect:", "PDF writer should render rounded iMessage-style bubbles")
+    assert_contains(writer, "outgoingBubbleColor", "PDF writer should distinguish outgoing blue bubbles")
+    assert_contains(writer, "incomingBubbleColor", "PDF writer should distinguish incoming gray bubbles")
+    assert_contains(writer, "drawReactionBadge", "PDF writer should render tapbacks/reactions as visible badges")
+    assert_contains(writer, "Inline reply:", "PDF writer should preserve iMessage inline reply context")
+    assert_contains(writer, "makeCard", "PDF writer should render inline replies, links, and attachments as natural in-bubble cards")
+    assert_contains(writer, "drawStatus", "PDF writer should render read/service status as small bubble metadata instead of transcript rows")
+    assert_contains(exporter, "reactions: reactionBadges", "PDF export should pass iMessage tapbacks into the PDF writer")
+    assert_contains(exporter, "inlineReply: replyPreview(for: msg)", "PDF export should pass inline reply previews into the PDF writer")
+    assert_contains(exporter, "thread_originator_guid", "Message export should read iMessage inline reply thread metadata")
+    assert_contains(exporter, "reply_to_guid", "Message export should read modern inline reply target metadata")
+    assert_contains(exporter, "attachments: attachmentSummaries", "PDF export should pass attachment metadata into the PDF writer")
+    assert_contains(exporter, "linkURL: msg.linkURL", "PDF export should pass rich-link URLs into the PDF writer")
+    assert_contains(exporter, "status: statusParts.isEmpty ? nil", "PDF export should pass service/read status into the PDF writer")
+    assert_contains(writer, "entry.isFromMe ? margin + contentWidth - bubbleWidth : margin", "PDF writer should right-align outgoing bubbles and left-align incoming bubbles")
+
+
 
 
 

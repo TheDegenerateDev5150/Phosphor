@@ -34,6 +34,11 @@ struct Message: Identifiable, Hashable {
     let attachments: [MessageAttachment]
     let isRead: Bool
     let reactions: [Reaction]
+    /// iMessage inline-reply target GUIDs. Modern iOS backups may populate
+    /// `reply_to_guid`; older thread metadata often uses `thread_originator_guid`.
+    let replyToGuid: String?
+    let threadOriginatorGuid: String?
+    let threadOriginatorPart: String?
     /// URL extracted from a rich-link preview balloon (`com.apple.messages.URLBalloonProvider`).
     let linkURL: String?
     let balloonBundleID: String?
@@ -165,6 +170,7 @@ enum ReactionType: Int, CaseIterable {
 enum MessageExportFormat: String, CaseIterable {
     case csv = "CSV"
     case txt = "Plain Text"
+    case pdf = "PDF"
     case html = "HTML"
     case json = "JSON"
     case mbox = "MBOX (Mail)"
@@ -173,6 +179,7 @@ enum MessageExportFormat: String, CaseIterable {
         switch self {
         case .csv: return "csv"
         case .txt: return "txt"
+        case .pdf: return "pdf"
         case .html: return "html"
         case .json: return "json"
         case .mbox: return "mbox"

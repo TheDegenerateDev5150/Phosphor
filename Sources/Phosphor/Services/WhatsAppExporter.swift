@@ -203,6 +203,8 @@ final class WhatsAppExporter {
             try exportCSV(messages: messages, title: chatTitle, to: path)
         case .txt:
             try exportTXT(messages: messages, title: chatTitle, to: path)
+        case .pdf:
+            try exportPDF(messages: messages, title: chatTitle, to: path)
         case .html:
             try exportHTML(messages: messages, title: chatTitle, to: path)
         case .json:
@@ -276,6 +278,23 @@ final class WhatsAppExporter {
             lines += "[\(msg.formattedDate)] \(sender):\n\(msg.displayText)\n\n"
         }
         try lines.write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    private func exportPDF(messages: [WAMessage], title: String, to path: String) throws {
+        let entries = messages.map { msg in
+            PDFTranscriptWriter.Entry(
+                title: msg.isFromMe ? "Me" : (msg.senderJid ?? "Unknown"),
+                subtitle: msg.formattedDate,
+                body: msg.displayText,
+                isFromMe: msg.isFromMe
+            )
+        }
+        try PDFTranscriptWriter.write(
+            title: title,
+            subtitle: "WhatsApp export • Exported by Phosphor • \(Date().shortString) • \(messages.count) messages",
+            entries: entries,
+            to: path
+        )
     }
 
     private func exportHTML(messages: [WAMessage], title: String, to path: String) throws {
