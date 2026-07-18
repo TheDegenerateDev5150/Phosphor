@@ -13,6 +13,8 @@ final class DeviceViewModel: ObservableObject {
     @Published var showPairAlert = false
     @Published var alertMessage = ""
     @Published var systemInfo: [String: String] = [:]
+    @Published var readinessReport: ReadinessReport?
+    @Published var isCheckingReadiness = false
 
     let deviceManager = DeviceManager()
     private var cancellables: Set<AnyCancellable> = []
@@ -46,6 +48,17 @@ final class DeviceViewModel: ObservableObject {
         nearbyWirelessDevices = deviceManager.nearbyWirelessDevices
         selectedDevice = deviceManager.selectedDevice
         isRefreshing = false
+        await refreshReadiness()
+    }
+
+    func refreshReadiness() async {
+        isCheckingReadiness = true
+        readinessReport = await ReadinessService.evaluate(
+            devices: devices,
+            nearbyWirelessDevices: nearbyWirelessDevices,
+            backupDirectory: BackupManager.activeBackupDir
+        )
+        isCheckingReadiness = false
     }
 
     func selectDevice(_ device: DeviceInfo) {

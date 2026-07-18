@@ -5,6 +5,7 @@ struct SettingsView: View {
 
     @AppStorage("phosphor.backupDirectory") private var backupDirectory = BackupManager.defaultBackupDir
     @State private var dependencyList: [DependencyItem] = []
+    @State private var isCheckingDependencies = false
     @AppStorage("phosphor.autoRefreshInterval") private var autoRefreshInterval: Double = 4.0
 
     @StateObject private var scheduler = BackupScheduler()
@@ -32,11 +33,17 @@ struct SettingsView: View {
                 }
         }
         .frame(width: 560, height: 460)
-        .onAppear {
-            let deps = Shell.checkDependencies()
-            dependencyList = deps.map { DependencyItem(name: $0.key, installed: $0.value) }
-                .sorted { $0.name < $1.name }
+        .task {
+            await refreshDependencies()
         }
+    }
+
+    private func refreshDependencies() async {
+        isCheckingDependencies = true
+        let deps = await ReadinessService.dependencyStatus()
+        dependencyList = deps.map { DependencyItem(name: $0.key, installed: $0.value) }
+            .sorted { $0.name < $1.name }
+        isCheckingDependencies = false
     }
 
     // MARK: - General
@@ -243,10 +250,9 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
 
                 Button("Check Again") {
-                    let deps = Shell.checkDependencies()
-                    dependencyList = deps.map { DependencyItem(name: $0.key, installed: $0.value) }
-                        .sorted { $0.name < $1.name }
+                    Task { await refreshDependencies() }
                 }
+                .disabled(isCheckingDependencies)
             }
             .padding()
         }

@@ -69,11 +69,7 @@ struct OnboardingView: View {
         .frame(width: 640, height: 480)
         .task {
             isCheckingDeps = true
-            depStatus = await withCheckedContinuation { c in
-                DispatchQueue.global().async {
-                    c.resume(returning: Shell.checkDependencies())
-                }
-            }
+            depStatus = await ReadinessService.dependencyStatus()
             isCheckingDeps = false
         }
     }

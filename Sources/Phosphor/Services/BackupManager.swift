@@ -98,10 +98,13 @@ final class BackupManager: ObservableObject {
     /// Preflight check: verify the active backup directory exists and is readable/writable
     /// by this process. ~/Library/Application Support/MobileSync/Backup is TCC-protected
     /// on macOS 10.15+ and requires Full Disk Access for sandboxed or unsigned apps.
-    static func validateBackupDirectory(_ path: String) -> (ok: Bool, reason: String?) {
+    static func validateBackupDirectory(_ path: String, createIfMissing: Bool = true) -> (ok: Bool, reason: String?) {
         let fm = FileManager.default
         var isDir: ObjCBool = false
         if !fm.fileExists(atPath: path, isDirectory: &isDir) {
+            guard createIfMissing else {
+                return (false, "Backup directory does not exist at \(path).")
+            }
             do {
                 try fm.createDirectory(atPath: path, withIntermediateDirectories: true)
             } catch {
@@ -340,6 +343,44 @@ final class BackupManager: ObservableObject {
         return looksLikeBackupFolder(deviceDirectory) ? .complete : .incomplete(path: deviceDirectory)
     }
 
+    private func finalizeSuccessfulBackup(udid: String, onProgress: @escaping (String) -> Void) -> Bool {
+        isCreatingBackup = false
+        switch Self.backupMetadataHealth(for: udid) {
+        case .complete:
+            backupProgress = "Backup complete"
+            backupPercent = 1.0
+            discoverBackups()
+            return true
+        case .missing:
+            backupProgress = "Backup metadata incomplete"
+            let path = Self.backupPath(for: udid)
+            lastBackupFailure = BackupFailure(
+                title: "Backup Metadata Incomplete",
+                message: "The backup command finished, but Phosphor could not find complete backup metadata. Run a fresh full backup with the device unlocked and connected over USB when possible.",
+                technicalDetails: path,
+                recoveryAction: .runFullBackup,
+                udid: udid,
+                recoveryPath: path
+            )
+            lastError = lastBackupFailure?.message
+            onProgress(lastError ?? "Backup metadata incomplete.")
+            return false
+        case .incomplete(let path):
+            backupProgress = "Backup metadata incomplete"
+            lastBackupFailure = BackupFailure(
+                title: "Backup Metadata Incomplete",
+                message: "The backup command finished, but the resulting backup metadata is incomplete. Move the incomplete folder to Trash, then run a fresh full backup with the device unlocked and connected over USB when possible.",
+                technicalDetails: path,
+                recoveryAction: .deleteIncompleteAndRunFull,
+                udid: udid,
+                recoveryPath: path
+            )
+            lastError = lastBackupFailure?.message
+            onProgress(lastError ?? "Backup metadata incomplete.")
+            return false
+        }
+    }
+
     /// Incremental backups require an existing valid backup metadata folder for
     /// the target UDID. If the folder is missing or partially-created, both
     /// backup backends fail with low-level MBErrorDomain/205 plist errors.
@@ -444,11 +485,7 @@ final class BackupManager: ObservableObject {
             onProgress: onProgress
         )
         if pySuccess {
-            isCreatingBackup = false
-            backupProgress = "Backup complete"
-            backupPercent = 1.0
-            discoverBackups()
-            return true
+            return finalizeSuccessfulBackup(udid: udid, onProgress: onProgress)
         }
 
         let pymobiledeviceStderr = pymobiledeviceStderrTail.joined(separator: "\n")
@@ -478,15 +515,15 @@ final class BackupManager: ObservableObject {
                 completion: { [weak self] exitCode in
                     Task { @MainActor in
                         guard let self else {
-                            continuation.resume(returning: exitCode == 0)
+                            continuation.resume(returning: false)
                             return
                         }
-                        self.isCreatingBackup = false
                         if exitCode == 0 {
-                            self.backupProgress = "Backup complete"
-                            self.backupPercent = 1.0
-                            self.discoverBackups()
+                            let verified = self.finalizeSuccessfulBackup(udid: udid, onProgress: onProgress)
+                            continuation.resume(returning: verified)
+                            return
                         } else {
+                            self.isCreatingBackup = false
                             let combinedStderr = [pymobiledeviceStderr, idevicebackupStderr]
                                 .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
                                 .joined(separator: "\n---\n")
@@ -503,7 +540,7 @@ final class BackupManager: ObservableObject {
                                 stderr: combinedStderr
                             )
                         }
-                        continuation.resume(returning: exitCode == 0)
+                        continuation.resume(returning: false)
                     }
                 }
             )
@@ -652,11 +689,7 @@ final class BackupManager: ObservableObject {
                 onProgress: onProgress
             )
             if success {
-                isCreatingBackup = false
-                backupProgress = "Backup complete"
-                backupPercent = 1.0
-                discoverBackups()
-                return true
+                return finalizeSuccessfulBackup(udid: udid, onProgress: onProgress)
             }
         }
 
@@ -685,12 +718,12 @@ final class BackupManager: ObservableObject {
                             continuation.resume(returning: exitCode == 0)
                             return
                         }
-                        self.isCreatingBackup = false
                         if exitCode == 0 {
-                            self.backupProgress = "Backup complete"
-                            self.backupPercent = 1.0
-                            self.discoverBackups()
+                            let verified = self.finalizeSuccessfulBackup(udid: udid, onProgress: onProgress)
+                            continuation.resume(returning: verified)
+                            return
                         } else {
+                            self.isCreatingBackup = false
                             let combinedStderr = [pymobiledeviceStderr, idevicebackupStderr]
                                 .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
                                 .joined(separator: "\n---\n")

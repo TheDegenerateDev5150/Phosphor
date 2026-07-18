@@ -91,11 +91,9 @@ struct ContentView: View {
     }
 
     private func checkTunnel() async {
-        tunnelRunning = await withCheckedContinuation { c in
-            DispatchQueue.global().async {
-                c.resume(returning: TunnelService.isRunning)
-            }
-        }
+        tunnelRunning = await Task.detached(priority: .utility) {
+            TunnelService.isRunning
+        }.value
     }
 
     @ViewBuilder
@@ -103,6 +101,8 @@ struct ContentView: View {
         switch selectedSection {
         case .devices:
             DeviceOverviewView()
+        case .readiness:
+            ReadinessCenterView()
         case .backups:
             BackupListView(onBrowseBackup: { selectedSection = .backupBrowser })
         case .backupBrowser:
@@ -146,7 +146,7 @@ struct ContentView: View {
         case .location:
             LocationView()
         case .none:
-            WelcomeView()
+            WelcomeView(onOpenReadiness: { selectedSection = .readiness })
         }
     }
 
@@ -215,6 +215,7 @@ struct BatteryIndicator: View {
 /// Shown when no section is selected - improved with quick-start guidance.
 struct WelcomeView: View {
 
+    let onOpenReadiness: () -> Void
     @State private var isPulsing = false
     @State private var depStatus: [String: Bool] = [:]
 
@@ -239,6 +240,13 @@ struct WelcomeView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
+            Button {
+                onOpenReadiness()
+            } label: {
+                Label("Run Readiness Check", systemImage: "checklist.checked")
+            }
+            .buttonStyle(.borderedProminent)
+
             VStack(alignment: .leading, spacing: 8) {
                 depRow("pymobiledevice3", installed: depStatus["pymobiledevice3"] ?? false)
                 depRow("libimobiledevice", installed: depStatus["ideviceinfo"] ?? false)
@@ -249,11 +257,7 @@ struct WelcomeView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
-            depStatus = await withCheckedContinuation { continuation in
-                DispatchQueue.global().async {
-                    continuation.resume(returning: Shell.checkDependencies())
-                }
-            }
+            depStatus = await ReadinessService.dependencyStatus()
         }
     }
 

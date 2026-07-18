@@ -117,6 +117,9 @@ def test_incremental_backups_require_existing_metadata(root: Path) -> None:
     assert_contains(manager, "incompleteBackupHasKnownMarkers", "Incomplete-backup recovery should require recognizable iOS backup markers before moving a folder")
     assert_contains(manager, "trashItem", "Incomplete-backup recovery should move folders to Trash instead of permanently deleting them")
     assert_not_contains(manager, "removeItem(atPath: path)", "Incomplete-backup recovery should not permanently delete backup folders")
+    assert_contains(manager, "finalizeSuccessfulBackup", "Completed backup commands should be verified before the UI reports success")
+    assert_contains(manager, "Backup Metadata Incomplete", "Post-backup verification should surface incomplete metadata as a structured failure")
+    assert_contains(manager, "backupMetadataHealth(for: udid)", "Post-backup verification should require complete metadata for the target device")
 
     view = read(root, "Sources/Phosphor/Views/Backup/BackupListView.swift")
     assert_contains(view, "shouldOfferIncremental(for: device)", "Backup UI should only offer incremental when a backup exists for the selected device")

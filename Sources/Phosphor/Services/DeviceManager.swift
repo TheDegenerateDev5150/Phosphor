@@ -29,11 +29,7 @@ final class DeviceManager: ObservableObject {
 
     func checkDependencies() {
         Task {
-            dependencyStatus = await withCheckedContinuation { continuation in
-                DispatchQueue.global().async {
-                    continuation.resume(returning: Shell.checkDependencies())
-                }
-            }
+            dependencyStatus = await ReadinessService.dependencyStatus()
         }
     }
 
