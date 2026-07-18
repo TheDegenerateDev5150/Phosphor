@@ -27,6 +27,12 @@ struct MessageListView: View {
             messageDetailPane
         }
         .onAppear(perform: loadIfNeeded)
+        .onChange(of: backupVM.selectedBackup?.id) { _, _ in
+            handleSelectedBackupChange()
+        }
+        .onChange(of: backupVM.backups.map(\.path)) { _, _ in
+            reconcileLoadedBackupWithAvailableBackups()
+        }
         .overlay(alignment: .bottom) {
             if messageVM.isExporting { exportProgressBar }
         }
@@ -54,10 +60,10 @@ struct MessageListView: View {
                 Text("Messages")
                     .font(.headline)
                 Spacer()
-                if !messageVM.chats.isEmpty {
+                if loadedBackupIsCurrent && !messageVM.chats.isEmpty {
                     exportAllMenu
                 }
-                if !messageVM.chats.isEmpty {
+                if loadedBackupIsCurrent && !messageVM.chats.isEmpty {
                     Text("\(messageVM.totalMessages) messages")
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
@@ -90,6 +96,14 @@ struct MessageListView: View {
 
             if messageVM.isLoading {
                 LoadingOverlay(message: "Loading messages...")
+            } else if messageVM.loadedBackupPath != nil && loadedBackupIsCurrent && messageVM.chats.isEmpty && messageVM.backupReadiness != .unknown {
+                EmptyStateView(
+                    icon: messageVM.backupReadiness.icon,
+                    title: messageVM.backupReadiness.title,
+                    subtitle: messageVM.backupReadiness.subtitle,
+                    action: chooseBackupFolder,
+                    actionLabel: "Choose Different Backup"
+                )
             } else if backupVM.selectedBackup == nil && backupVM.backups.isEmpty {
                 EmptyStateView(
                     icon: "message",
@@ -114,7 +128,7 @@ struct MessageListView: View {
                     },
                     actionLabel: backupVM.backups.isEmpty ? "Choose Backup Folder" : "Use Latest Backup"
                 )
-            } else if messageVM.chats.isEmpty {
+            } else if loadedBackupIsCurrent && messageVM.chats.isEmpty {
                 EmptyStateView(
                     icon: messageVM.backupReadiness.icon,
                     title: messageVM.backupReadiness.title,
@@ -316,7 +330,7 @@ struct MessageListView: View {
 
     private var messageDetailPane: some View {
         VStack(spacing: 0) {
-            if let chat = messageVM.selectedChat {
+            if let chat = messageVM.selectedChat, loadedBackupIsCurrent {
                 // Chat header
                 HStack {
                     Text(chat.title)
@@ -374,19 +388,32 @@ struct MessageListView: View {
                 EmptyStateView(
                     icon: "bubble.left.and.bubble.right",
                     title: "Select a Conversation",
-                    subtitle: messageVM.chats.isEmpty
-                        ? "Choose a backup to load messages."
-                        : "Choose a conversation from the list, or export every conversation at once.",
-                    action: messageVM.chats.isEmpty ? nil : {
+                    subtitle: loadedBackupIsCurrent && !messageVM.chats.isEmpty
+                        ? "Choose a conversation from the list, or export every conversation at once."
+                        : "Choose a backup to load messages.",
+                    action: loadedBackupIsCurrent && !messageVM.chats.isEmpty ? {
                         exportAllConversations(format: .html)
-                    },
-                    actionLabel: messageVM.chats.isEmpty ? nil : "Export All as HTML…"
+                    } : nil,
+                    actionLabel: loadedBackupIsCurrent && !messageVM.chats.isEmpty ? "Export All as HTML…" : nil
                 )
             }
         }
     }
 
     // MARK: - Helpers
+
+    private var loadedBackupIsCurrent: Bool {
+        guard let loadedPath = messageVM.loadedBackupPath else { return false }
+        guard backupVM.backups.contains(where: { $0.path == loadedPath }) else { return false }
+        if let selected = backupVM.selectedBackup {
+            return selected.path == loadedPath
+        }
+        // Some message-readable states (for example encrypted or unreadable backups)
+        // intentionally do not leave BackupViewModel.selectedBackup set because the
+        // manifest browser cannot open them. Keep their Messages readiness copy visible
+        // as long as the loaded backup still exists in the picker list.
+        return true
+    }
 
     private func loadIfNeeded() {
         if backupVM.backups.isEmpty {
@@ -415,10 +442,35 @@ struct MessageListView: View {
         guard backupVM.backups.map(\.path) != previousPaths else { return }
         if let latest = backupVM.backups.first {
             selectBackup(latest)
+        } else {
+            messageVM.clear()
+        }
+    }
+
+    private func handleSelectedBackupChange() {
+        if let backup = backupVM.selectedBackup {
+            if messageVM.loadedBackupPath != backup.path {
+                loadMessages(from: backup)
+            }
+        } else {
+            reconcileLoadedBackupWithAvailableBackups()
+        }
+    }
+
+    private func reconcileLoadedBackupWithAvailableBackups() {
+        guard let loadedPath = messageVM.loadedBackupPath else { return }
+        guard backupVM.backups.contains(where: { $0.path == loadedPath }) else {
+            messageVM.clear()
+            return
+        }
+        if let selected = backupVM.selectedBackup, selected.path != loadedPath {
+            loadMessages(from: selected)
         }
     }
 
     private func loadMessages(from backup: BackupInfo) {
+        searchText = ""
+        messageSearchText = ""
         messageVM.loadChats(from: backup.path)
         if messageVM.selectedChat == nil, let firstChat = messageVM.chats.first {
             messageVM.selectChat(firstChat)
@@ -430,7 +482,7 @@ struct MessageListView: View {
     /// single `UTType` per modifier and was rewriting `.html` to `.txt`
     /// (issue #17).
     private func exportSingleChat(format: MessageExportFormat) {
-        guard let chat = messageVM.selectedChat else { return }
+        guard loadedBackupIsCurrent, let chat = messageVM.selectedChat else { return }
         let panel = NSSavePanel()
         panel.title = "Export Conversation"
         panel.nameFieldStringValue = "\(safeFileName(chat.title)).\(format.fileExtension)"
@@ -451,6 +503,7 @@ struct MessageListView: View {
     }
 
     private func exportAllConversations(format: MessageExportFormat) {
+        guard loadedBackupIsCurrent else { return }
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true

@@ -10,6 +10,7 @@ final class DiagnosticsManager: ObservableObject {
 
     /// Active syslog process for proper termination.
     private var syslogProcess: Process?
+    private var syslogStreamID: UUID?
 
     struct BatteryDiagnostics {
         let currentCapacity: Int
@@ -173,51 +174,84 @@ final class DiagnosticsManager: ObservableObject {
 
     func startSyslog(udid: String) {
         guard !isStreamingSyslog else { return }
+        let streamID = UUID()
+        syslogStreamID = streamID
         isStreamingSyslog = true
         syslogLines = []
 
-        // Primary: pymobiledevice3 syslog
-        syslogProcess = PyMobileDevice.startSyslog(
+        // Primary: pymobiledevice3 syslog. Store the return value locally first:
+        // PyMobileDevice/Shell can synchronously call completion(-1) on launch
+        // failure, and that completion may already install the fallback process.
+        let primaryProcess = PyMobileDevice.startSyslog(
             udid: udid,
             onOutput: { [weak self] line in
-                guard let self else { return }
-                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmed.isEmpty else { return }
-
-                if self.syslogLines.count > 5000 {
-                    self.syslogLines.removeFirst(500)
-                }
-                self.syslogLines.append(trimmed)
+                guard let self, self.syslogStreamID == streamID else { return }
+                self.appendSyslogLine(line)
             },
-            completion: { [weak self] _ in
-                self?.isStreamingSyslog = false
-                self?.syslogProcess = nil
+            completion: { [weak self] exitCode in
+                guard let self, self.syslogStreamID == streamID else { return }
+                self.syslogProcess = nil
+                if exitCode != 0, self.isStreamingSyslog {
+                    self.startSyslogFallback(udid: udid, streamID: streamID)
+                } else {
+                    self.isStreamingSyslog = false
+                    self.syslogStreamID = nil
+                }
             }
         )
+        if let primaryProcess {
+            // Do not overwrite a fallback that a synchronous launch-failure
+            // completion installed before PyMobileDevice.startSyslog returned.
+            if syslogStreamID == streamID, syslogProcess == nil {
+                syslogProcess = primaryProcess
+            } else {
+                Shell.terminate(primaryProcess)
+            }
+        }
 
-        // Fallback if pymobiledevice3 failed
+        // Fallback if pymobiledevice3 failed to launch and completion did not
+        // already install an idevicesyslog process.
+        if syslogStreamID == streamID, isStreamingSyslog, syslogProcess == nil {
+            startSyslogFallback(udid: udid, streamID: streamID)
+        }
+    }
+
+    private func appendSyslogLine(_ line: String) {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if syslogLines.count > 5000 {
+            syslogLines.removeFirst(500)
+        }
+        syslogLines.append(trimmed)
+    }
+
+    private func startSyslogFallback(udid: String, streamID: UUID) {
+        guard syslogStreamID == streamID, isStreamingSyslog else { return }
+        syslogProcess = Shell.runStreaming(
+            "idevicesyslog",
+            arguments: ["-u", udid],
+            onOutput: { [weak self] line in
+                guard let self, self.syslogStreamID == streamID else { return }
+                self.appendSyslogLine(line)
+            },
+            completion: { [weak self] _ in
+                guard let self, self.syslogStreamID == streamID else { return }
+                self.syslogProcess = nil
+                self.isStreamingSyslog = false
+                self.syslogStreamID = nil
+            }
+        )
         if syslogProcess == nil {
-            Shell.runStreaming(
-                "idevicesyslog",
-                arguments: ["-u", udid],
-                onOutput: { [weak self] line in
-                    guard let self else { return }
-                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty else { return }
-                    if self.syslogLines.count > 5000 {
-                        self.syslogLines.removeFirst(500)
-                    }
-                    self.syslogLines.append(trimmed)
-                },
-                completion: { [weak self] _ in
-                    self?.isStreamingSyslog = false
-                }
-            )
+            isStreamingSyslog = false
+            syslogStreamID = nil
         }
     }
 
     func stopSyslog() {
-        syslogProcess?.terminate()
+        syslogStreamID = nil
+        if let syslogProcess {
+            Shell.terminate(syslogProcess)
+        }
         syslogProcess = nil
         isStreamingSyslog = false
     }

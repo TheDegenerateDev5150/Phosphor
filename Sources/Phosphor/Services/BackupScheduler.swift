@@ -224,18 +224,47 @@ final class BackupScheduler: ObservableObject {
         }
 
         let calendar = Calendar.current
-        var next: Date
+        let now = Date()
+        let anchor = schedule.lastRunDate ?? now
 
-        if let lastRun = schedule.lastRunDate {
-            next = lastRun.addingTimeInterval(schedule.frequency.interval)
-        } else {
-            var components = calendar.dateComponents([.year, .month, .day], from: Date())
+        func scheduledTime(on date: Date) -> Date {
+            var components = calendar.dateComponents([.year, .month, .day, .hour], from: date)
             components.hour = schedule.preferredHour
             components.minute = schedule.preferredMinute
-            next = calendar.date(from: components) ?? Date()
-            if next <= Date() {
-                next = calendar.date(byAdding: .day, value: 1, to: next) ?? next
+            components.second = 0
+            return calendar.date(from: components) ?? date
+        }
+
+        func advance(_ date: Date) -> Date {
+            switch schedule.frequency {
+            case .hourly:
+                var components = calendar.dateComponents([.year, .month, .day, .hour], from: date)
+                components.minute = schedule.preferredMinute
+                components.second = 0
+                let aligned = calendar.date(from: components) ?? date
+                return calendar.date(byAdding: .hour, value: aligned <= date ? 1 : 0, to: aligned) ?? date.addingTimeInterval(schedule.frequency.interval)
+            case .daily:
+                return calendar.date(byAdding: .day, value: 1, to: date) ?? date.addingTimeInterval(schedule.frequency.interval)
+            case .weekly:
+                return calendar.date(byAdding: .day, value: 7, to: date) ?? date.addingTimeInterval(schedule.frequency.interval)
+            case .biweekly:
+                return calendar.date(byAdding: .day, value: 14, to: date) ?? date.addingTimeInterval(schedule.frequency.interval)
+            case .monthly:
+                return calendar.date(byAdding: .month, value: 1, to: date) ?? date.addingTimeInterval(schedule.frequency.interval)
             }
+        }
+
+        var next: Date
+        if schedule.frequency == .hourly {
+            next = advance(anchor)
+        } else if schedule.lastRunDate != nil {
+            next = scheduledTime(on: advance(anchor))
+        } else {
+            next = scheduledTime(on: now)
+        }
+
+        while next <= now {
+            next = schedule.frequency == .hourly ? advance(next) : scheduledTime(on: advance(next))
         }
 
         schedule.nextRunDate = next

@@ -114,8 +114,45 @@ final class MessageViewModel: ObservableObject {
     private var backupPath: String?
     private var exportCancelled = false
     private var exportTask: Task<Void, Never>?
+    private var exportOperationID: UUID?
+
+    var loadedBackupPath: String? { backupPath }
+
+    func clear() {
+        exportTask?.cancel()
+        exportTask = nil
+        exportOperationID = nil
+        exporter = nil
+        backupPath = nil
+        chats = []
+        selectedChat = nil
+        messages = []
+        searchQuery = ""
+        searchResults = []
+        isLoading = false
+        backupReadiness = .unknown
+        backupReadinessMessage = ""
+        isExporting = false
+        exportProgressText = ""
+        exportProgress = 0
+        exportResult = nil
+        exportCancelled = false
+    }
+
+    private func invalidateExportForBackupSwitch() {
+        exportTask?.cancel()
+        exportTask = nil
+        exportOperationID = nil
+        isExporting = false
+        exportProgressText = ""
+        exportProgress = 0
+        exportCancelled = false
+    }
 
     func loadChats(from backupPath: String) {
+        if self.backupPath != backupPath {
+            invalidateExportForBackupSwitch()
+        }
         self.backupPath = backupPath
         backupReadiness = Self.readiness(for: backupPath)
         backupReadinessMessage = backupReadiness.subtitle
@@ -211,8 +248,10 @@ final class MessageViewModel: ObservableObject {
         exportCancelled = false
         exportProgress = 0.1
         exportProgressText = "Exporting \(chat.title)…"
+        let exportID = UUID()
+        exportOperationID = exportID
 
-        exportTask = Task.detached(priority: .userInitiated) { [weak self, chat, sourceMessages, fallbackMessages, backupPath] in
+        exportTask = Task.detached(priority: .userInitiated) { [weak self, chat, sourceMessages, fallbackMessages, backupPath, exportID] in
             do {
                 let exporter = try MessageExporter(backupPath: backupPath, contacts: .empty)
                 let baseMessages: [Message]
@@ -225,24 +264,31 @@ final class MessageViewModel: ObservableObject {
                 }
                 let filtered = options.apply(to: baseMessages)
                 try Task.checkCancellation()
-                try exporter.exportMessages(filtered, chatTitle: chat.title, format: format, to: normalisedPath, options: options)
+                try exporter.exportMessages(filtered, chatTitle: chat.title, format: format, to: normalisedPath, options: options) {
+                    try Task.checkCancellation()
+                }
                 await MainActor.run { [weak self] in
-                    guard let self else { return }
+                    guard let self, self.exportOperationID == exportID, self.backupPath == backupPath else { return }
                     self.isExporting = false
+                    self.exportOperationID = nil
                     self.exportProgress = 1
                     self.exportResult = MessageExportResult(url: URL(fileURLWithPath: normalisedPath), summary: "Exported \(filtered.count) messages")
                 }
             } catch is CancellationError {
                 await MainActor.run { [weak self] in
-                    self?.isExporting = false
-                    self?.alertMessage = "Export cancelled"
-                    self?.showAlert = true
+                    guard let self, self.exportOperationID == exportID, self.backupPath == backupPath else { return }
+                    self.isExporting = false
+                    self.exportOperationID = nil
+                    self.alertMessage = "Export cancelled"
+                    self.showAlert = true
                 }
             } catch {
                 await MainActor.run { [weak self] in
-                    self?.isExporting = false
-                    self?.alertMessage = "Export failed: \(error.localizedDescription)"
-                    self?.showAlert = true
+                    guard let self, self.exportOperationID == exportID, self.backupPath == backupPath else { return }
+                    self.isExporting = false
+                    self.exportOperationID = nil
+                    self.alertMessage = "Export failed: \(error.localizedDescription)"
+                    self.showAlert = true
                 }
             }
         }
@@ -256,35 +302,51 @@ final class MessageViewModel: ObservableObject {
         exportCancelled = false
         exportProgress = 0
         exportProgressText = "Preparing export…"
+        let exportID = UUID()
+        exportOperationID = exportID
 
-        exportTask = Task.detached(priority: .userInitiated) { [weak self, backupPath] in
+        exportTask = Task.detached(priority: .userInitiated) { [weak self, backupPath, exportID] in
             do {
                 let exporter = try MessageExporter(backupPath: backupPath, contacts: .empty)
-                let count = try exporter.exportAllChats(format: format, to: directory, options: options) { completed, total, title in
-                    try Task.checkCancellation()
-                    let progress = total == 0 ? 0 : Double(completed) / Double(total)
-                    Task { @MainActor [weak self] in
-                        self?.exportProgress = progress
-                        self?.exportProgressText = completed >= total ? "Export complete" : "Exporting \(completed + 1) of \(total): \(title)"
+                let count = try exporter.exportAllChats(
+                    format: format,
+                    to: directory,
+                    options: options,
+                    onProgress: { completed, total, title in
+                        try Task.checkCancellation()
+                        let progress = total == 0 ? 0 : Double(completed) / Double(total)
+                        Task { @MainActor [weak self] in
+                            guard let self, self.exportOperationID == exportID, self.backupPath == backupPath else { return }
+                            self.exportProgress = progress
+                            self.exportProgressText = completed >= total ? "Export complete" : "Exporting \(completed + 1) of \(total): \(title)"
+                        }
+                    },
+                    cancellationCheck: {
+                        try Task.checkCancellation()
                     }
-                }
+                )
                 await MainActor.run { [weak self] in
-                    guard let self else { return }
+                    guard let self, self.exportOperationID == exportID, self.backupPath == backupPath else { return }
                     self.isExporting = false
+                    self.exportOperationID = nil
                     self.exportProgress = 1
                     self.exportResult = MessageExportResult(url: URL(fileURLWithPath: directory), summary: "Exported \(count) conversations")
                 }
             } catch is CancellationError {
                 await MainActor.run { [weak self] in
-                    self?.isExporting = false
-                    self?.alertMessage = "Export cancelled"
-                    self?.showAlert = true
+                    guard let self, self.exportOperationID == exportID, self.backupPath == backupPath else { return }
+                    self.isExporting = false
+                    self.exportOperationID = nil
+                    self.alertMessage = "Export cancelled"
+                    self.showAlert = true
                 }
             } catch {
                 await MainActor.run { [weak self] in
-                    self?.isExporting = false
-                    self?.alertMessage = "Export failed: \(error.localizedDescription)"
-                    self?.showAlert = true
+                    guard let self, self.exportOperationID == exportID, self.backupPath == backupPath else { return }
+                    self.isExporting = false
+                    self.exportOperationID = nil
+                    self.alertMessage = "Export failed: \(error.localizedDescription)"
+                    self.showAlert = true
                 }
             }
         }

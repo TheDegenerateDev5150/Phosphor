@@ -78,6 +78,44 @@ enum Shell {
         }
     }
 
+    private final class StreamingCommandState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var didFinish = false
+        private var timeoutTask: Task<Void, Never>?
+
+        func hasFinished() -> Bool {
+            lock.lock()
+            let value = didFinish
+            lock.unlock()
+            return value
+        }
+
+        func setTimeoutTask(_ task: Task<Void, Never>) {
+            lock.lock()
+            if didFinish {
+                lock.unlock()
+                task.cancel()
+                return
+            }
+            timeoutTask = task
+            lock.unlock()
+        }
+
+        func finish() -> Bool {
+            lock.lock()
+            guard !didFinish else {
+                lock.unlock()
+                return false
+            }
+            didFinish = true
+            let task = timeoutTask
+            timeoutTask = nil
+            lock.unlock()
+            task?.cancel()
+            return true
+        }
+    }
+
     private static func environmentWithToolPaths() -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -250,10 +288,17 @@ enum Shell {
     }
 
     /// Run a command with real-time output streaming via callback. Returns Process for termination.
+    ///
+    /// Long-running one-shot device operations (backup/restore) should pass a timeout so a
+    /// wedged child process cannot leave the UI waiting forever. Truly open-ended streams
+    /// such as syslog should keep the default `nil` timeout and be stopped explicitly by
+    /// the caller.
     @discardableResult
     static func runStreaming(
         _ command: String,
         arguments: [String] = [],
+        timeout: TimeInterval? = nil,
+        environment: [String: String]? = nil,
         onOutput: @escaping (String) -> Void,
         onError: @escaping (String) -> Void = { _ in },
         completion: @escaping (Int32) -> Void
@@ -261,12 +306,22 @@ enum Shell {
         let process = Process()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
+        let state = StreamingCommandState()
 
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = [command] + arguments
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
-        process.environment = environmentWithToolPaths()
+        process.environment = environment ?? environmentWithToolPaths()
+
+        @Sendable func finish(exitCode: Int32, timedOut: Bool = false) {
+            guard state.finish() else { return }
+            stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+            process.terminationHandler = nil
+
+            DispatchQueue.main.async { completion(exitCode) }
+        }
 
         stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
@@ -283,18 +338,57 @@ enum Shell {
         }
 
         process.terminationHandler = { proc in
-            stdoutPipe.fileHandleForReading.readabilityHandler = nil
-            stderrPipe.fileHandleForReading.readabilityHandler = nil
-            DispatchQueue.main.async { completion(proc.terminationStatus) }
+            finish(exitCode: proc.terminationStatus)
         }
 
         do {
             try process.run()
-            return process
         } catch {
+            process.terminationHandler = nil
+            stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
             onError("Failed to launch: \(error.localizedDescription)")
             completion(-1)
             return nil
+        }
+
+        if let timeout {
+            let timeoutTask = Task {
+                let nanoseconds = UInt64(max(timeout, 0) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: nanoseconds)
+                guard !Task.isCancelled, !state.hasFinished() else { return }
+
+                let message = "Command timed out after \(Int(timeout))s"
+                DispatchQueue.main.async { onError(message) }
+                process.terminate()
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled, !state.hasFinished() else { return }
+
+                process.interrupt()
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled, !state.hasFinished() else { return }
+
+                Darwin.kill(process.processIdentifier, SIGKILL)
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled else { return }
+                finish(exitCode: -2, timedOut: true)
+            }
+            state.setTimeoutTask(timeoutTask)
+        }
+
+        return process
+    }
+
+    /// Terminate a long-running child and escalate if it ignores graceful shutdown.
+    static func terminate(_ process: Process) {
+        process.terminate()
+        Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard process.isRunning else { return }
+            process.interrupt()
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard process.isRunning else { return }
+            Darwin.kill(process.processIdentifier, SIGKILL)
         }
     }
 

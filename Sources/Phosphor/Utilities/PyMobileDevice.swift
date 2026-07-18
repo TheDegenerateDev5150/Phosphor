@@ -167,6 +167,7 @@ enum PyMobileDevice {
     @discardableResult
     static func runStreaming(
         _ subcommands: [String],
+        timeout: TimeInterval? = nil,
         onOutput: @escaping (String) -> Void,
         onError: @escaping (String) -> Void = { _ in },
         completion: @escaping (Int32) -> Void
@@ -177,45 +178,17 @@ enum PyMobileDevice {
             return nil
         }
 
-        let process = Process()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-
-        process.executableURL = URL(fileURLWithPath: cmd.cmd)
-        process.arguments = cmd.args
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-        process.environment = ProcessInfo.processInfo.environment
-        process.environment?["PATH"] = extendedPath
-
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if !data.isEmpty, let str = String(data: data, encoding: .utf8) {
-                DispatchQueue.main.async { onOutput(str) }
-            }
-        }
-
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if !data.isEmpty, let str = String(data: data, encoding: .utf8) {
-                DispatchQueue.main.async { onError(str) }
-            }
-        }
-
-        process.terminationHandler = { proc in
-            stdoutPipe.fileHandleForReading.readabilityHandler = nil
-            stderrPipe.fileHandleForReading.readabilityHandler = nil
-            DispatchQueue.main.async { completion(proc.terminationStatus) }
-        }
-
-        do {
-            try process.run()
-            return process
-        } catch {
-            onError("Failed to launch pymobiledevice3: \(error.localizedDescription)")
-            completion(-1)
-            return nil
-        }
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = extendedPath
+        return Shell.runStreaming(
+            cmd.cmd,
+            arguments: cmd.args,
+            timeout: timeout,
+            environment: environment,
+            onOutput: onOutput,
+            onError: onError,
+            completion: completion
+        )
     }
 
     // MARK: - Device Discovery
@@ -732,6 +705,7 @@ enum PyMobileDevice {
         udid: String? = nil,
         full: Bool = true,
         preferNetwork: Bool = false,
+        timeout: TimeInterval? = 6 * 60 * 60,
         onOutput: @escaping (String) -> Void,
         onError: @escaping (String) -> Void = { _ in },
         completion: @escaping (Int32) -> Void
@@ -746,7 +720,7 @@ enum PyMobileDevice {
         if let udid { args += ["--udid", udid] }
         args.append(directory)
 
-        return runStreaming(args, onOutput: onOutput, onError: onError, completion: completion)
+        return runStreaming(args, timeout: timeout, onOutput: onOutput, onError: onError, completion: completion)
     }
 
     /// Restore a backup.
@@ -755,6 +729,7 @@ enum PyMobileDevice {
         udid: String? = nil,
         system: Bool = true,
         reboot: Bool = true,
+        timeout: TimeInterval? = 6 * 60 * 60,
         onOutput: @escaping (String) -> Void,
         completion: @escaping (Int32) -> Void
     ) -> Process? {
@@ -764,7 +739,7 @@ enum PyMobileDevice {
         if let udid { args += ["--udid", udid] }
         args.append(directory)
 
-        return runStreaming(args, onOutput: onOutput, completion: completion)
+        return runStreaming(args, timeout: timeout, onOutput: onOutput, completion: completion)
     }
 
     /// Check/change encryption.

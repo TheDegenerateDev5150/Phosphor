@@ -25,6 +25,7 @@ final class BackupViewModel: ObservableObject {
     private var currentManifest: BackupManifest?
     private var sizeResolutionTask: Task<Void, Never>?
     private var lastBackupRequest: BackupRequest?
+    private var backupOperationID: UUID?
 
     private struct BackupRequest {
         let udid: String
@@ -98,26 +99,35 @@ final class BackupViewModel: ObservableObject {
     }
 
     func createBackup(udid: String, incremental: Bool = false, preferNetwork: Bool = false) async {
+        let operationID = UUID()
+        backupOperationID = operationID
         lastBackupRequest = BackupRequest(udid: udid, incremental: incremental, preferNetwork: preferNetwork)
         isCreating = true
         progressText = "Preparing..."
 
         let success: Bool
         if incremental {
-            success = await backupManager.createIncrementalBackup(udid: udid, preferNetwork: preferNetwork) { [weak self] text in
+            success = await backupManager.createIncrementalBackup(udid: udid, preferNetwork: preferNetwork) { [weak self, operationID] text in
+                guard self?.backupOperationID == operationID else { return }
                 self?.progressText = text
             }
         } else {
-            success = await backupManager.createBackup(udid: udid, preferNetwork: preferNetwork) { [weak self] text in
+            success = await backupManager.createBackup(udid: udid, preferNetwork: preferNetwork) { [weak self, operationID] text in
+                guard self?.backupOperationID == operationID else { return }
                 self?.progressText = text
             }
         }
 
+        guard backupOperationID == operationID else { return }
+        backupOperationID = nil
         isCreating = false
         if success {
             alertMessage = "Backup completed"
             showAlert = true
             loadBackups()
+        } else if backupManager.lastOperationWasCancelled {
+            // User-initiated cancellation is not a backup failure.
+            progressText = "Cancelled"
         } else if let failure = backupManager.lastBackupFailure {
             backupIssue = failure
         } else {

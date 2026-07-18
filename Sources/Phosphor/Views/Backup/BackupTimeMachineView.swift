@@ -361,7 +361,7 @@ struct BackupTimeMachineView: View {
             isRestoring = false
             restoreProgress = nil
 
-            if !success {
+            if !success, !backupVM.backupManager.lastOperationWasCancelled {
                 backupVM.alertMessage = "Restore failed. Check device connection."
                 backupVM.showAlert = true
             }

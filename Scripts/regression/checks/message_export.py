@@ -66,6 +66,116 @@ def test_attachment_path_cache_invariants(root: Path) -> None:
     assert_contains(src, "missingAttachmentDiskPaths.insert(filename)", "resolver should store negative cache")
 
 
+def test_message_view_clears_stale_loaded_backup_and_preserves_readiness(root: Path) -> None:
+    view_model = read(root, "Sources/Phosphor/ViewModels/MessageViewModel.swift")
+    assert_contains(view_model, "func clear()", "MessageViewModel should expose a clear path for stale backup state")
+    assert_contains(view_model, "var loadedBackupPath", "MessageViewModel should expose the loaded backup path for UI reconciliation")
+    assert_contains(view_model, "exportOperationID", "Message exports should ignore stale detached task completions after clearing/switching backups")
+    assert_contains(view_model, "invalidateExportForBackupSwitch", "Switching backups should cancel and clear active export state")
+    assert_contains(view_model, "exportTask?.cancel()", "Switching/clearing backups should cancel active detached export work")
+    assert_contains(view_model, "self.exportOperationID == exportID", "Detached export completions should only update current export state")
+    assert_contains(view_model, "self.backupPath == backupPath", "Detached export completions should not update UI after the loaded backup changes")
+
+    view = read(root, "Sources/Phosphor/Views/Messages/MessageListView.swift")
+    assert_contains(view, ".onChange(of: backupVM.selectedBackup?.id)", "Messages should react when BackupViewModel clears or changes the selected backup")
+    assert_contains(view, ".onChange(of: backupVM.backups.map(\\.path))", "Messages should react when the backup folder/list changes")
+    assert_contains(view, "reconcileLoadedBackupWithAvailableBackups", "Messages should clear old chats when their backup path disappears")
+    assert_contains(view, "messageVM.clear()", "Messages should clear stale conversations/export state")
+    assert_contains(view, "messageVM.loadedBackupPath != nil && loadedBackupIsCurrent && messageVM.chats.isEmpty", "Messages readiness should render even when BackupViewModel selectedBackup is nil after manifest-open failure")
+    assert_contains(view, "guard loadedBackupIsCurrent", "Export actions should be gated to the currently loaded backup")
+
+
+def test_stale_export_completion_model_requires_current_operation_and_backup(root: Path) -> None:
+    del root
+    state = {
+        "exportOperationID": "export-1",
+        "backupPath": "/backups/A",
+        "isExporting": True,
+        "exportResult": None,
+    }
+
+    def complete(export_id: str, backup_path: str, result: str) -> None:
+        if state["exportOperationID"] != export_id or state["backupPath"] != backup_path:
+            return
+        state["isExporting"] = False
+        state["exportOperationID"] = None
+        state["exportResult"] = result
+
+    def fail_or_cancel(export_id: str, backup_path: str, message: str) -> None:
+        if state["exportOperationID"] != export_id or state["backupPath"] != backup_path:
+            return
+        state["isExporting"] = False
+        state["exportOperationID"] = None
+        state["alertMessage"] = message
+
+    def switch_backup(path: str) -> None:
+        if state["backupPath"] != path:
+            state["exportOperationID"] = None
+            state["isExporting"] = False
+        state["backupPath"] = path
+
+    state["exportOperationID"] = None  # MessageViewModel.clear()
+    complete("export-1", "/backups/A", "stale clear completion")
+    fail_or_cancel("export-1", "/backups/A", "stale clear failure")
+    assert state["exportResult"] is None, "cleared exports must ignore stale completions"
+    assert "alertMessage" not in state, "cleared exports must ignore stale failure/cancel alerts"
+
+    state.update(exportOperationID="export-2", backupPath="/backups/A", isExporting=True)
+    switch_backup("/backups/B")
+    complete("export-2", "/backups/A", "stale backup completion")
+    fail_or_cancel("export-2", "/backups/A", "stale backup failure")
+    assert state["exportResult"] is None, "backup switches must ignore completions from the old backup"
+    assert "alertMessage" not in state, "backup switches must ignore failure/cancel alerts from the old backup"
+    assert state["isExporting"] is False, "backup switches should not leave the export overlay stuck"
+
+    state.update(exportOperationID="export-3", backupPath="/backups/B", isExporting=True)
+    complete("export-3", "/backups/B", "current completion")
+    assert state["exportResult"] == "current completion"
+    assert state["isExporting"] is False
+
+
+def test_message_exports_escape_csv_and_mbox_headers(root: Path) -> None:
+    src = read(root, "Sources/Phosphor/Services/MessageExporter.swift")
+    helper = read(root, "Sources/Phosphor/Utilities/CSVExport.swift")
+    assert_contains(helper, "enum CSVExport", "CSV export escaping should be centralized for all CSV surfaces")
+    assert_contains(helper, "static func field", "CSV helper should expose field escaping")
+    assert_contains(helper, "drop(while:", "CSV helper should detect formula payloads after leading whitespace")
+    assert_contains(helper, '["=", "+", "-", "@"].contains', "CSV helper should neutralize spreadsheet formula-leading cells")
+    assert_contains(src, "fields.map(CSVExport.field)", "Message CSV export should escape every field, not only message text")
+    assert_contains(src, "private func mboxToken", "MBOX export should sanitize Message-ID/boundary tokens")
+    assert_contains(src, "private func headerToken", "MBOX export should sanitize MIME header tokens")
+    assert_contains(src, ".replacingOccurrences(of: \"\\n\", with: \" \")", "MBOX header encoding should strip raw newlines")
+    assert_contains(src, "embeddedAttachments", "MBOX export should collect every embeddable attachment")
+    assert_contains(src, "for embedded in embeddedAttachments", "MBOX export should emit all non-payload attachments, not just the first")
+
+
+def test_csv_exports_share_formula_safe_helper(root: Path) -> None:
+    helper = read(root, "Sources/Phosphor/Utilities/CSVExport.swift")
+    assert_contains(helper, "static func row", "CSV helper should centralize whole-row creation")
+    for rel in [
+        "Sources/Phosphor/Services/CalendarExtractor.swift",
+        "Sources/Phosphor/Services/CallLogExtractor.swift",
+        "Sources/Phosphor/Services/ContactsExtractor.swift",
+        "Sources/Phosphor/Services/HealthExtractor.swift",
+        "Sources/Phosphor/Services/SafariExtractor.swift",
+        "Sources/Phosphor/Services/WhatsAppExporter.swift",
+    ]:
+        src = read(root, rel)
+        assert_contains(src, "CSVExport.row", f"{rel} should use the shared CSV escaping/formula-neutralization helper")
+
+
+def test_message_export_writers_check_cancellation_inside_long_loops(root: Path) -> None:
+    src = read(root, "Sources/Phosphor/Services/MessageExporter.swift")
+    assert_contains(src, "cancellationCheck: (() throws -> Void)?", "Message exports should accept a cancellation checkpoint")
+    for func_name in ["exportCSV", "exportPlainText", "exportHTML", "exportMbox", "exportJSON"]:
+        match = re.search(rf"private func {func_name}.*?(?=\n    private func|\n    ///|\Z)", src, re.S)
+        assert match is not None, f"{func_name} not found"
+        assert_contains(match.group(0), "try cancellationCheck?()", f"{func_name} should stop promptly during large single-chat exports")
+    stage = re.search(r"private func stageAttachments.*?(?=\n    private func|\n    ///|\Z)", src, re.S)
+    assert stage is not None, "stageAttachments should exist"
+    assert_contains(stage.group(0), "try cancellationCheck?()", "HTML attachment staging should be cancellable")
+
+
 def test_minimal_sms_schema_fixture_supports_limited_attachment_query(root: Path) -> None:
     del root
     with tempfile.TemporaryDirectory() as tmp:
