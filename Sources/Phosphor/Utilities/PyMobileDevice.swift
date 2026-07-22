@@ -751,6 +751,7 @@ enum PyMobileDevice {
     static func restore(
         directory: String,
         udid: String? = nil,
+        sourceUDID: String? = nil,
         system: Bool = true,
         reboot: Bool = true,
         timeout: TimeInterval? = 6 * 60 * 60,
@@ -761,6 +762,7 @@ enum PyMobileDevice {
         if system { args.append("--system") }
         if reboot { args.append("--reboot") }
         if let udid { args += ["--udid", udid] }
+        if let sourceUDID { args += ["--source", sourceUDID] }
         args.append(directory)
 
         return runStreaming(args, timeout: timeout, onOutput: onOutput, completion: completion)

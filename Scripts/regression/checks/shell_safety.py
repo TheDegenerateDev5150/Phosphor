@@ -100,6 +100,29 @@ def test_backup_streaming_callers_are_timeout_bounded_and_cancelable(root: Path)
     assert "Shell.terminate(syslogProcess)" in diagnostics, "stopSyslog should escalate termination for stuck syslog children"
 
 
+def test_restore_captures_target_and_uses_backup_parent_with_source_udid(root: Path) -> None:
+    time_machine = read(root, "Sources/Phosphor/Views/Backup/BackupTimeMachineView.swift")
+    assert "struct RestoreRequest" in time_machine, "restore confirmation should capture one backup and target device"
+    assert "@State private var pendingRestore: RestoreRequest?" in time_machine, "restore alert should be driven by one item-scoped request"
+    assert "pendingRestore = RestoreRequest(backup: backup, targetUDID: target.id" in time_machine, "restore target must be captured when the button is clicked"
+    assert "performRestore(request)" in time_machine, "confirmation must execute the captured request"
+    assert "showRestoreConfirm" not in time_machine, "one Boolean shared by every backup card can confirm the wrong snapshot"
+
+    backup = read(root, "Sources/Phosphor/Services/BackupManager.swift")
+    assert "func restoreBackup(\n        backup: BackupInfo,\n        targetUDID: String" in backup, "restore service should accept typed source-backup metadata and an explicit target"
+    assert "deletingLastPathComponent" in swift_block_after(backup, "func restoreBackup("), "restore backends need the directory containing the source-UDID folder"
+    assert "sourceUDID: backup.udid" in swift_block_after(backup, "func restoreBackup("), "cross-device restores must identify the source backup UDID"
+    assert '["-u", targetUDID, "-s", backup.udid, "restore", "--system", backupRoot]' in backup, "idevicebackup2 options must precede restore and include source/target UDIDs"
+
+    py = read(root, "Sources/Phosphor/Utilities/PyMobileDevice.swift")
+    restore = swift_block_after(py, "static func restore(")
+    assert "sourceUDID: String?" in restore, "pymobiledevice restore should accept a source backup UDID"
+    assert 'args += ["--source", sourceUDID]' in restore, "pymobiledevice restore should pass --source for cross-device safety"
+
+    clone = read(root, "Sources/Phosphor/Services/DeviceCloneService.swift")
+    assert "backup: latestBackup" in clone and "targetUDID: destinationUDID" in clone, "clone restore must keep source backup and destination device distinct"
+
+
 def test_cancellation_token_model_prevents_cancelled_primary_from_starting_fallback(root: Path) -> None:
     del root
     active_operation_id: str | None = None
