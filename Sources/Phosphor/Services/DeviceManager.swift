@@ -18,6 +18,7 @@ final class DeviceManager: ObservableObject {
     private var batteryInfoCache: [String: (info: [String: String], fetchedAt: Date)] = [:]
     private var pairStatusCache: [String: (isPaired: Bool, fetchedAt: Date)] = [:]
     private var bonjourDeviceCache: (devices: [PyMobileDevice.BonjourDevice], fetchedAt: Date)?
+    private var compatibilityOnlyDeviceEntries: [PyMobileDevice.DeviceEntry] = []
     private var lastCompatibilityDiscoveryAt = Date()
     private let deviceInfoRefreshInterval: TimeInterval = 30
     private let batteryInfoRefreshInterval: TimeInterval = 60
@@ -60,13 +61,14 @@ final class DeviceManager: ObservableObject {
         // substantially more CPU. Explicit refreshes and systems without both
         // idevice_id transports retain the full pymobiledevice3 compatibility path.
         let lightweightScan = await listLibimobiledeviceEntries()
-        var entries = lightweightScan.entries
         let compatibilityScanIsDue = Date().timeIntervalSince(lastCompatibilityDiscoveryAt) >= compatibilityDiscoveryInterval
         if forceRefresh || !lightweightScan.isAvailable || compatibilityScanIsDue {
             lastCompatibilityDiscoveryAt = Date()
             let pyEntries = await PyMobileDevice.listDevicesWithType()
-            entries = mergeDeviceEntries(entries + pyEntries)
+            let lightweightIDs = Set(lightweightScan.entries.map(\.udid))
+            compatibilityOnlyDeviceEntries = pyEntries.filter { !lightweightIDs.contains($0.udid) }
         }
+        let entries = mergeDeviceEntries(lightweightScan.entries + compatibilityOnlyDeviceEntries)
 
         if entries.isEmpty {
             let bonjourDevices = await cachedBonjourDevices(forceRefresh: forceRefresh)

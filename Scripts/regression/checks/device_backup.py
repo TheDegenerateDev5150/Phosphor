@@ -151,6 +151,23 @@ def test_device_polling_prefers_lightweight_discovery_before_python_fallback(roo
     assert_not_contains(manager, "cachedNetworkDeviceEntries", "listDevicesWithType already queries network devices; polling must not launch a duplicate network query")
     assert_contains(manager, "Shell.runAsync(\"idevice_id\", arguments: [\"-l\"], timeout: 5)", "routine USB discovery must be timeout bounded")
     assert_contains(manager, "Shell.runAsync(\"idevice_id\", arguments: [\"-n\"], timeout: 5)", "routine network discovery must be timeout bounded")
+    assert_contains(manager, "compatibilityOnlyDeviceEntries", "pymobiledevice-only devices must persist between compatibility scans")
+    assert_contains(manager, "compatibilityOnlyDeviceEntries = pyEntries.filter", "compatibility cache should exclude devices already covered by lightweight discovery")
+    assert_contains(manager, "lightweightScan.entries + compatibilityOnlyDeviceEntries", "every routine poll should merge cached compatibility-only devices")
+
+    compatibility_cache: list[str] = []
+
+    def poll(lightweight: list[str], compatibility: list[str] | None = None) -> list[str]:
+        nonlocal compatibility_cache
+        if compatibility is not None:
+            lightweight_ids = set(lightweight)
+            compatibility_cache = [item for item in compatibility if item not in lightweight_ids]
+        return list(dict.fromkeys(lightweight + compatibility_cache))
+
+    assert poll([], ["py-only"]) == ["py-only"], "compatibility discovery should publish a pymobiledevice-only device"
+    assert poll([]) == ["py-only"], "intervening lightweight polls should retain a pymobiledevice-only device"
+    assert poll([], []) == [], "a later compatibility scan should remove devices no longer discovered"
+    assert poll(["native"], ["native", "py-only"]) == ["native", "py-only"], "cache should retain only compatibility-exclusive entries"
 
 
 def test_wifi_schedules_use_network_discovery_and_network_backup_flag(root: Path) -> None:
