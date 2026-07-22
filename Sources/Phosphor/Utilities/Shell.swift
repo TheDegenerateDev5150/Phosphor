@@ -18,6 +18,7 @@ enum Shell {
         private var stdoutData = Data()
         private var stderrData = Data()
         private var didFinish = false
+        private var timedOut = false
         private var watchdog: Task<Void, Never>?
 
         /// Hand the timeout watchdog to the state so it can be cancelled the moment the
@@ -43,6 +44,24 @@ enum Shell {
             lock.unlock()
         }
 
+        func markTimedOut() -> Bool {
+            lock.lock()
+            guard !didFinish else {
+                lock.unlock()
+                return false
+            }
+            timedOut = true
+            lock.unlock()
+            return true
+        }
+
+        func hasTimedOut() -> Bool {
+            lock.lock()
+            let value = timedOut
+            lock.unlock()
+            return value
+        }
+
         func hasFinished() -> Bool {
             lock.lock()
             let value = didFinish
@@ -50,18 +69,19 @@ enum Shell {
             return value
         }
 
-        func finish(timedOut: Bool, timeout: TimeInterval, exitCode: Int32) -> Result? {
+        func finish(timeout: TimeInterval, exitCode: Int32) -> Result? {
             lock.lock()
             guard !didFinish else {
                 lock.unlock()
                 return nil
             }
             didFinish = true
+            let didTimeOut = timedOut
             let pendingWatchdog = watchdog
             watchdog = nil
             let stdout = stdoutData
             var stderr = String(data: stderrData, encoding: .utf8) ?? ""
-            if timedOut {
+            if didTimeOut {
                 let timeoutMessage = "Command timed out after \(Int(timeout))s"
                 stderr = stderr.isEmpty ? timeoutMessage : stderr + "\n" + timeoutMessage
             }
@@ -71,7 +91,7 @@ enum Shell {
             pendingWatchdog?.cancel()
 
             return Result(
-                exitCode: timedOut ? -2 : exitCode,
+                exitCode: didTimeOut ? -2 : exitCode,
                 stdout: String(data: stdout, encoding: .utf8) ?? "",
                 stderr: stderr
             )
@@ -81,6 +101,7 @@ enum Shell {
     private final class StreamingCommandState: @unchecked Sendable {
         private let lock = NSLock()
         private var didFinish = false
+        private var timedOut = false
         private var timeoutTask: Task<Void, Never>?
 
         func hasFinished() -> Bool {
@@ -88,6 +109,17 @@ enum Shell {
             let value = didFinish
             lock.unlock()
             return value
+        }
+
+        func markTimedOut() -> Bool {
+            lock.lock()
+            guard !didFinish else {
+                lock.unlock()
+                return false
+            }
+            timedOut = true
+            lock.unlock()
+            return true
         }
 
         func setTimeoutTask(_ task: Task<Void, Never>) {
@@ -101,18 +133,19 @@ enum Shell {
             lock.unlock()
         }
 
-        func finish() -> Bool {
+        func finish(exitCode: Int32) -> Int32? {
             lock.lock()
             guard !didFinish else {
                 lock.unlock()
-                return false
+                return nil
             }
             didFinish = true
+            let result = timedOut ? -2 : exitCode
             let task = timeoutTask
             timeoutTask = nil
             lock.unlock()
             task?.cancel()
-            return true
+            return result
         }
     }
 
@@ -225,7 +258,7 @@ enum Shell {
             for (key, value) in extraEnvironment { environment[key] = value }
             process.environment = environment
 
-            @Sendable func finish(timedOut: Bool) {
+            @Sendable func finish() {
                 stdoutPipe.fileHandleForReading.readabilityHandler = nil
                 stderrPipe.fileHandleForReading.readabilityHandler = nil
                 state.append(stdoutPipe.fileHandleForReading.availableData, toStdout: true)
@@ -234,8 +267,8 @@ enum Shell {
                 // On the timed-out path the process may not be reaped yet; reading
                 // terminationStatus while it is still running throws. state.finish
                 // ignores the exit code for timeouts, so pass a placeholder there.
+                let timedOut = state.hasTimedOut()
                 guard let result = state.finish(
-                    timedOut: timedOut,
                     timeout: timeout,
                     exitCode: timedOut ? -1 : process.terminationStatus
                 ) else {
@@ -255,7 +288,7 @@ enum Shell {
             }
 
             process.terminationHandler = { _ in
-                finish(timedOut: false)
+                finish()
             }
 
             do {
@@ -275,7 +308,7 @@ enum Shell {
             let watchdogTask = Task {
                 let nanoseconds = UInt64(max(timeout, 0) * 1_000_000_000)
                 try? await Task.sleep(nanoseconds: nanoseconds)
-                guard !Task.isCancelled, !state.hasFinished() else { return }
+                guard !Task.isCancelled, state.markTimedOut() else { return }
 
                 process.terminate()
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -287,7 +320,7 @@ enum Shell {
 
                 Darwin.kill(process.processIdentifier, SIGKILL)
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
-                finish(timedOut: true)
+                finish()
             }
             state.attachWatchdog(watchdogTask)
         }
@@ -320,13 +353,13 @@ enum Shell {
         process.standardError = stderrPipe
         process.environment = environment ?? environmentWithToolPaths()
 
-        @Sendable func finish(exitCode: Int32, timedOut: Bool = false) {
-            guard state.finish() else { return }
+        @Sendable func finish(exitCode: Int32) {
+            guard let resolvedExitCode = state.finish(exitCode: exitCode) else { return }
             stdoutPipe.fileHandleForReading.readabilityHandler = nil
             stderrPipe.fileHandleForReading.readabilityHandler = nil
             process.terminationHandler = nil
 
-            DispatchQueue.main.async { completion(exitCode) }
+            DispatchQueue.main.async { completion(resolvedExitCode) }
         }
 
         stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
@@ -362,7 +395,7 @@ enum Shell {
             let timeoutTask = Task {
                 let nanoseconds = UInt64(max(timeout, 0) * 1_000_000_000)
                 try? await Task.sleep(nanoseconds: nanoseconds)
-                guard !Task.isCancelled, !state.hasFinished() else { return }
+                guard !Task.isCancelled, state.markTimedOut() else { return }
 
                 let message = "Command timed out after \(Int(timeout))s"
                 DispatchQueue.main.async { onError(message) }
@@ -377,7 +410,7 @@ enum Shell {
                 Darwin.kill(process.processIdentifier, SIGKILL)
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 guard !Task.isCancelled else { return }
-                finish(exitCode: -2, timedOut: true)
+                finish(exitCode: -2)
             }
             state.setTimeoutTask(timeoutTask)
         }
