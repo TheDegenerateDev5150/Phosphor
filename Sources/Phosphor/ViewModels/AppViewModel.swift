@@ -60,7 +60,7 @@ final class AppViewModel: ObservableObject {
 
     func extractAppData(bundleId: String, backupPath: String, to dest: String) async {
         let count = await appManager.extractAppData(bundleId: bundleId, from: backupPath, to: dest)
-        alertMessage = count > 0 ? "Extracted \(count) files" : "No files extracted"
+        alertMessage = count > 0 ? "Extracted \(count) files" : (appManager.lastError ?? "No files extracted")
         showAlert = true
     }
 }

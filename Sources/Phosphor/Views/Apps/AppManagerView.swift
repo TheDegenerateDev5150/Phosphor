@@ -250,7 +250,6 @@ struct AppManagerView: View {
               let url = panel.url,
               let backup = backupVM.selectedBackup else { return }
 
-        let dest = (url.path as NSString).appendingPathComponent(app.id)
-        Task { await appVM.extractAppData(bundleId: app.id, backupPath: backup.path, to: dest) }
+        Task { await appVM.extractAppData(bundleId: app.id, backupPath: backup.path, to: url.path) }
     }
 }

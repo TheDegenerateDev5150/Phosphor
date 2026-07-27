@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import tempfile
 
 
 def read(root: Path, rel: str) -> str:
@@ -37,6 +39,111 @@ def test_backup_password_is_not_passed_on_the_command_line(root: Path) -> None:
     # The old argv-based idevicebackup2 encryption invocations must be gone.
     assert '"encryption", "on", password' not in backup, "password must not be an idevicebackup2 argv value"
     assert '"encryption", "off", password' not in backup, "password must not be an idevicebackup2 argv value"
+
+
+def test_app_extraction_rejects_traversal_and_symlink_components(root: Path) -> None:
+    utility_path = root / "Sources/Phosphor/Utilities/SafeExtractionPath.swift"
+    assert utility_path.exists(), "app extraction needs a shared safe destination resolver"
+
+    app_manager = read(root, "Sources/Phosphor/Services/AppManager.swift")
+    assert "SafeExtractionPath.prepareExtractionRoot" in app_manager, "AppManager must validate the untrusted bundle ID beneath the selected directory"
+    assert "SafeExtractionPath.prepareDestination" in app_manager, "app extraction must validate every manifest relative path before writing"
+    assert "appendingPathComponent(entry.relativePath)" not in app_manager, "untrusted manifest paths must not be appended directly"
+    assert "lastError = nil" in app_manager[app_manager.index("func extractAppData("):], "app extraction should clear stale errors before validating paths"
+
+    app_view = read(root, "Sources/Phosphor/Views/Apps/AppManagerView.swift")
+    assert "appendingPathComponent(app.id)" not in app_view, "the view must not turn an untrusted bundle ID into the trusted extraction root"
+    assert "to: url.path" in app_view, "AppManager needs the selected directory so it can enforce the boundary itself"
+
+    app_view_model = read(root, "Sources/Phosphor/ViewModels/AppViewModel.swift")
+    assert 'appManager.lastError ?? "No files extracted"' in app_view_model, "unsafe-path failures should be shown instead of a generic empty result"
+
+    probe = r'''
+import Foundation
+
+@main
+struct SafePathProbe {
+    static func main() throws {
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+        let outside = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(at: root.appendingPathComponent("symlinked-app"), withDestinationURL: outside)
+
+        let extractionRoot = try SafeExtractionPath.prepareExtractionRoot(
+            selectedDirectory: root,
+            component: "com.example.app",
+            fileManager: fm
+        )
+        try fm.createSymbolicLink(at: extractionRoot.appendingPathComponent("linked"), withDestinationURL: outside)
+
+        let safe = try SafeExtractionPath.prepareDestination(
+            root: extractionRoot,
+            relativePath: "Documents/file.txt",
+            fileManager: fm
+        )
+        guard safe.path == extractionRoot.appendingPathComponent("Documents/file.txt").path else {
+            throw NSError(domain: "Probe", code: 1)
+        }
+
+        for component in ["", ".", "..", "../outside", "nested/app", "/tmp/absolute", "symlinked-app"] {
+            do {
+                _ = try SafeExtractionPath.prepareExtractionRoot(
+                    selectedDirectory: root,
+                    component: component,
+                    fileManager: fm
+                )
+                print("ALLOWED_ROOT|\(component)")
+                throw NSError(domain: "Probe", code: 2)
+            } catch SafeExtractionPath.PathError.unsafePath {
+                continue
+            }
+        }
+
+        let unsafe = [
+            "",
+            "/tmp/absolute.txt",
+            "../victim.txt",
+            "Documents/../../victim.txt",
+            "Documents/./file.txt",
+            "linked/victim.txt"
+        ]
+        for path in unsafe {
+            do {
+                _ = try SafeExtractionPath.prepareDestination(root: extractionRoot, relativePath: path, fileManager: fm)
+                print("ALLOWED|\(path)")
+                throw NSError(domain: "Probe", code: 2)
+            } catch SafeExtractionPath.PathError.unsafePath {
+                continue
+            }
+        }
+        print("PASS")
+    }
+}
+'''
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp = Path(temp_dir)
+        probe_path = temp / "Probe.swift"
+        probe_path.write_text(probe)
+        executable = temp / "safe-path-probe"
+        compile_result = subprocess.run(
+            ["swiftc", "-parse-as-library", str(utility_path), str(probe_path), "-o", str(executable)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert compile_result.returncode == 0, compile_result.stderr
+        result = subprocess.run(
+            [str(executable), str(temp / "root"), str(temp / "outside")],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "PASS", result.stdout
 
 
 def test_shell_runasync_supports_extra_environment(root: Path) -> None:

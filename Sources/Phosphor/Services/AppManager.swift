@@ -183,23 +183,39 @@ final class AppManager: ObservableObject {
     func extractAppData(
         bundleId: String,
         from backupPath: String,
-        to destination: String
+        to selectedDirectory: String
     ) async -> Int {
+        lastError = nil
         do {
             let manifest = try BackupManifest(backupPath: backupPath)
             let files = try manifest.appFiles(bundleId: bundleId)
 
             let fm = FileManager.default
-            try fm.createDirectory(atPath: destination, withIntermediateDirectories: true)
+            let extractionRoot = try SafeExtractionPath.prepareExtractionRoot(
+                selectedDirectory: URL(fileURLWithPath: selectedDirectory, isDirectory: true),
+                component: bundleId,
+                fileManager: fm
+            )
+
+            let extractionPlan = try files.filter(\.isFile).map { entry in
+                let destinationURL = try SafeExtractionPath.prepareDestination(
+                    root: extractionRoot,
+                    relativePath: entry.relativePath,
+                    fileManager: fm
+                )
+                return (entry, destinationURL)
+            }
 
             var extracted = 0
-            for entry in files where entry.isFile {
-                let destPath = (destination as NSString).appendingPathComponent(entry.relativePath)
-                let destDir = (destPath as NSString).deletingLastPathComponent
-                try fm.createDirectory(atPath: destDir, withIntermediateDirectories: true)
-
+            for (entry, destinationURL) in extractionPlan {
                 do {
-                    try manifest.extractFile(entry, to: destPath)
+                    let verifiedDestination = try SafeExtractionPath.prepareDestination(
+                        root: extractionRoot,
+                        relativePath: entry.relativePath,
+                        fileManager: fm
+                    )
+                    guard verifiedDestination == destinationURL else { continue }
+                    try manifest.extractFile(entry, to: verifiedDestination.path)
                     extracted += 1
                 } catch {
                     continue
