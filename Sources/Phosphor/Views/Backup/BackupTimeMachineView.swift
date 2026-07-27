@@ -10,10 +10,16 @@ struct BackupTimeMachineView: View {
     var onBrowseBackup: () -> Void = {}
     @State private var selectedIndex: Int = 0
     @State private var isAnimating = false
-    @State private var showRestoreConfirm = false
+    @State private var pendingRestore: RestoreRequest?
     @State private var restoreProgress: String?
     @State private var isRestoring = false
     @State private var starPositions: [StarParticle] = generateStars(count: 120)
+
+    private struct RestoreRequest {
+        let backup: BackupInfo
+        let targetUDID: String
+        let targetName: String
+    }
 
     struct StarParticle: Identifiable {
         let id = UUID()
@@ -71,6 +77,25 @@ struct BackupTimeMachineView: View {
                 restoreOverlay(progress)
             }
         }
+        .alert(
+            "Restore Backup?",
+            isPresented: restoreConfirmationPresented,
+            presenting: pendingRestore
+        ) { request in
+            Button("Cancel", role: .cancel) {}
+            Button("Restore", role: .destructive) {
+                performRestore(request)
+            }
+        } message: { request in
+            Text("Restore \(request.targetName) from \(request.backup.dateString)? The device will restart, and this cannot be undone.")
+        }
+    }
+
+    private var restoreConfirmationPresented: Binding<Bool> {
+        Binding(
+            get: { pendingRestore != nil },
+            set: { if !$0 { pendingRestore = nil } }
+        )
     }
 
     // MARK: - Star Field
@@ -165,7 +190,8 @@ struct BackupTimeMachineView: View {
                 if offset == 0 {
                     HStack(spacing: 8) {
                         Button("Restore This Backup") {
-                            showRestoreConfirm = true
+                            guard let target = deviceVM.selectedDevice else { return }
+                            pendingRestore = RestoreRequest(backup: backup, targetUDID: target.id, targetName: target.name)
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(.brandAccent)
@@ -212,14 +238,6 @@ struct BackupTimeMachineView: View {
         .opacity(cardOpacity)
         .zIndex(zIndex)
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: selectedIndex)
-        .alert("Restore Backup?", isPresented: $showRestoreConfirm) {
-            Button("Cancel", role: .cancel) {}
-            Button("Restore", role: .destructive) {
-                performRestore(backup)
-            }
-        } message: {
-            Text("This will restore your device to the state from \(backup.dateString). The device will restart. This cannot be undone.")
-        }
     }
 
     // MARK: - Timeline Bar
@@ -346,15 +364,14 @@ struct BackupTimeMachineView: View {
 
     // MARK: - Actions
 
-    private func performRestore(_ backup: BackupInfo) {
-        guard let udid = deviceVM.selectedDevice?.id else { return }
+    private func performRestore(_ request: RestoreRequest) {
         isRestoring = true
         restoreProgress = "Preparing restore..."
 
         Task {
             let success = await backupVM.backupManager.restoreBackup(
-                backupPath: backup.path,
-                udid: udid
+                backup: request.backup,
+                targetUDID: request.targetUDID
             ) { [self] text in
                 restoreProgress = text
             }

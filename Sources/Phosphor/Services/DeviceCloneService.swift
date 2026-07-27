@@ -102,8 +102,8 @@ final class DeviceCloneService: ObservableObject {
         progress = "Restoring to destination device..."
 
         let restoreSuccess = await backupManager.restoreBackup(
-            backupPath: latestBackup.path,
-            udid: destinationUDID
+            backup: latestBackup,
+            targetUDID: destinationUDID
         ) { [weak self] text in
             self?.progress = text
             if let pct = PyMobileDevice.parseProgress(from: text) {

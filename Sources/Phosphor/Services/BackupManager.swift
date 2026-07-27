@@ -835,17 +835,19 @@ final class BackupManager: ObservableObject {
 
     /// Restore a backup to a device. pymobiledevice3 primary, idevicebackup2 fallback.
     func restoreBackup(
-        backupPath: String,
-        udid: String,
+        backup: BackupInfo,
+        targetUDID: String,
         onProgress: @escaping (String) -> Void
     ) async -> Bool {
         let operationID = beginCancellableOperation()
+        let backupRoot = (backup.path as NSString).deletingLastPathComponent
         // Primary: pymobiledevice3
         if PyMobileDevice.available() {
             return await withCheckedContinuation { continuation in
                 activeProcess = PyMobileDevice.restore(
-                    directory: backupPath,
-                    udid: udid,
+                    directory: backupRoot,
+                    udid: targetUDID,
+                    sourceUDID: backup.udid,
                     timeout: Self.streamingRestoreTimeout,
                     onOutput: { output in onProgress(output) },
                     completion: { [weak self] exitCode in
@@ -871,7 +873,7 @@ final class BackupManager: ObservableObject {
         return await withCheckedContinuation { continuation in
             activeProcess = Shell.runStreaming(
                 "idevicebackup2",
-                arguments: ["restore", "--system", "--reboot", "-u", udid, backupPath],
+                arguments: ["-u", targetUDID, "-s", backup.udid, "restore", "--system", backupRoot],
                 timeout: Self.streamingRestoreTimeout,
                 onOutput: { output in onProgress(output) },
                 onError: { _ in },
