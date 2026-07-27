@@ -22,6 +22,12 @@ final class BackupViewModel: ObservableObject {
     @Published var searchQuery = ""
     @Published var searchResults: [BackupManifest.FileEntry] = []
 
+    // Encrypted-backup unlock. Set when a browse attempt hits a locked backup;
+    // the view presents a password sheet bound to it.
+    @Published var pendingUnlock: BackupInfo?
+    @Published var unlockError: String?
+    @Published var isUnlocking = false
+
     let backupManager = BackupManager()
     private var currentManifest: BackupManifest?
     private var sizeResolutionTask: Task<Void, Never>?
@@ -227,6 +233,19 @@ final class BackupViewModel: ObservableObject {
     @discardableResult
     func openBackupBrowser(_ backup: BackupInfo) -> Bool {
         clearBrowserState()
+
+        // An encrypted backup that has not been unlocked this session needs a
+        // password before anything can be read. Ask for it instead of reporting
+        // a failure the user cannot act on.
+        if backup.isEncrypted && !BackupUnlockStore.shared.isUnlocked(backup.path) {
+            // A remembered password unlocks silently; otherwise ask.
+            if !unlockFromKeychain(backup) {
+                unlockError = nil
+                pendingUnlock = backup
+                return false
+            }
+        }
+
         currentManifest = backupManager.openManifest(for: backup)
 
         guard let manifest = currentManifest else {
@@ -246,6 +265,48 @@ final class BackupViewModel: ObservableObject {
             showAlert = true
             return false
         }
+    }
+
+    /// Derive the backup's keys and open it. Key derivation runs two PBKDF2 chains,
+    /// so it is deliberately slow and belongs off the main actor.
+    func submitUnlock(password: String, remember: Bool) async {
+        guard let backup = pendingUnlock, !password.isEmpty else { return }
+        isUnlocking = true
+        unlockError = nil
+        defer { isUnlocking = false }
+
+        let path = backup.path
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try BackupUnlockStore.shared.unlock(backupPath: path, password: password)
+            }.value
+        } catch {
+            unlockError = error.localizedDescription
+            return
+        }
+
+        if remember {
+            // Best effort: a Keychain refusal must not block a successful unlock.
+            BackupPasswordKeychain.save(password: password, backupPath: path)
+        }
+        pendingUnlock = nil
+        openBackupBrowser(backup)
+    }
+
+    func cancelUnlock() {
+        pendingUnlock = nil
+        unlockError = nil
+    }
+
+    /// Try a password the user previously chose to remember. Returns false when
+    /// nothing is stored or the stored password no longer works.
+    func unlockFromKeychain(_ backup: BackupInfo) -> Bool {
+        guard let stored = BackupPasswordKeychain.password(for: backup.path) else { return false }
+        guard (try? BackupUnlockStore.shared.unlock(backupPath: backup.path, password: stored)) != nil else {
+            BackupPasswordKeychain.delete(backupPath: backup.path)
+            return false
+        }
+        return true
     }
 
     func browseDomain(_ domain: String) {

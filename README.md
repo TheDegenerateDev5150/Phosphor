@@ -79,6 +79,7 @@ Apple's Finder integration is all-or-nothing. Proprietary tools like iMazing cos
 - Navigate by domain (Camera Roll, Apps, Home, System, Keychain, etc.)
 - Search files across the entire backup
 - Extract individual files or entire domains
+- Open password-protected backups. Phosphor prompts for the backup password and decrypts natively (PBKDF2, RFC 3394 key unwrap, AES-256-CBC) with no Python or external tools. Works on backups made by Finder, iMazing, libimobiledevice and pymobiledevice3, not only ones Phosphor created. The password stays in memory for the session unless you tick "Remember this password", which stores it in the macOS Keychain.
 - Manage backup encryption
 - Delete old backups
 
@@ -102,7 +103,7 @@ Apple's Finder integration is all-or-nothing. Proprietary tools like iMazing cos
 - Browse apps stored in backups with data sizes
 - Install `.ipa` files directly to device
 - Remove apps from device
-- Extract individual app containers (Documents, Library, tmp)
+- Extract an app's container out of a backup - pick a backup in the Apps header, then use Extract Data on any app row. Extraction reads from a local backup, not from the connected device.
 
 ### File System
 - Browse device filesystem via AFC (Apple File Conduit) - no FUSE/ifuse required on macOS Sonoma+
@@ -250,7 +251,7 @@ Phosphor parses this to provide file-system-like browsing without modifying the 
 - [x] Music and ringtone transfer (extract from backup, install to device via AFC)
 - [x] Batch operations (multi-select extract in Photos, Music)
 - [x] Wi-Fi device connection (libimobiledevice network mode)
-- [x] Encrypted backup browsing (via iphone-backup-decrypt)
+- [x] Encrypted backup browsing (native, no Python or external tools)
 - [x] Drag-and-drop file transfer
 - [x] Localization (English, Arabic, Spanish, French, German, Japanese, Chinese)
 - [x] Apple Watch data through paired iPhone

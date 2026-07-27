@@ -37,6 +37,13 @@ final class BackupManifest {
     let backupPath: String
     private let db: SQLiteReader
     private var sizeCache: [String: Int] = [:]
+    /// Non-nil when this backup was unlocked earlier in the session. Every blob
+    /// read goes through it, so consumers never see ciphertext.
+    private let decryptor: BackupDecryptor?
+    /// Private 0700 scratch directory holding the decrypted Manifest.db and any
+    /// file copies materialized for readers that need a path. Removed on deinit.
+    private let plaintextScratch: URL?
+    private var plaintextCache: [String: String] = [:]
 
     struct FileEntry: Identifiable, Hashable {
         let id: String // fileID (SHA-1 hash)
@@ -103,24 +110,116 @@ final class BackupManifest {
         guard fm.fileExists(atPath: manifestPath) else {
             throw ManifestError.manifestMissing(path: manifestPath)
         }
-        if let plist = PlistParser.parseManifest(backupPath), plist.isEncrypted {
-            throw ManifestError.backupEncrypted(path: manifestPath)
-        }
+
+        let declaredEncrypted = PlistParser.parseManifest(backupPath)?.isEncrypted ?? false
+        var hasSQLiteHeader = true
         if let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: manifestPath)) {
             defer { try? handle.close() }
-            let header = try? handle.read(upToCount: Self.sqliteMagic.count)
-            if header != Self.sqliteMagic {
-                // Missing the SQLite magic means encrypted data (most common),
-                // a truncated download, or a different file format entirely.
-                throw ManifestError.backupEncrypted(path: manifestPath)
-            }
+            hasSQLiteHeader = (try? handle.read(upToCount: Self.sqliteMagic.count)) == Self.sqliteMagic
         }
 
+        // An encrypted backup is readable once it has been unlocked this session.
+        // Everything downstream then works unchanged, because the manifest hands
+        // out plaintext.
+        if declaredEncrypted || !hasSQLiteHeader {
+            guard let decryptor = BackupUnlockStore.shared.decryptor(for: backupPath) else {
+                throw ManifestError.backupEncrypted(path: manifestPath)
+            }
+            let scratch = Self.makeScratchDirectory()
+            let plaintextManifest = scratch.appendingPathComponent("Manifest.db")
+            do {
+                try decryptor.decryptedManifestDatabase()
+                    .write(to: plaintextManifest, options: .atomic)
+                try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: plaintextManifest.path)
+                self.db = try SQLiteReader(path: plaintextManifest.path)
+            } catch {
+                try? fm.removeItem(at: scratch)
+                throw ManifestError.manifestUnreadable(path: manifestPath, underlying: error.localizedDescription)
+            }
+            self.decryptor = decryptor
+            self.plaintextScratch = scratch
+            return
+        }
+
+        self.decryptor = nil
+        self.plaintextScratch = nil
         do {
             self.db = try SQLiteReader(path: manifestPath)
         } catch {
             throw ManifestError.manifestUnreadable(path: manifestPath, underlying: error.localizedDescription)
         }
+    }
+
+    deinit {
+        if let plaintextScratch {
+            try? FileManager.default.removeItem(at: plaintextScratch)
+        }
+    }
+
+    /// SQLite needs a file, so decrypted bytes have to land somewhere. Keep them in
+    /// a per-instance 0700 directory that is removed when the manifest goes away.
+    private static func makeScratchDirectory() -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("phosphor-unlocked-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: url,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        return url
+    }
+
+    /// True when this manifest is serving decrypted content.
+    var isDecrypting: Bool { decryptor != nil }
+
+    /// Plaintext bytes for one entry, decrypting on the fly when needed.
+    func fileData(for entry: FileEntry) throws -> Data {
+        let sourcePath = entry.diskPath(backupRoot: backupPath)
+        guard let decryptor else {
+            return try Data(contentsOf: URL(fileURLWithPath: sourcePath))
+        }
+        return try decryptor.decryptFile(
+            at: sourcePath,
+            record: fileRecord(for: entry.id),
+            displayName: entry.fileName
+        )
+    }
+
+    /// A readable on-disk path for one entry. Unencrypted backups return the blob
+    /// in place; encrypted ones get a decrypted copy in this manifest's scratch
+    /// directory. Use this for readers that need a path rather than bytes, such as
+    /// SQLiteReader.
+    func readablePath(for entry: FileEntry) throws -> String {
+        let sourcePath = entry.diskPath(backupRoot: backupPath)
+        guard decryptor != nil, let plaintextScratch else { return sourcePath }
+        if let cached = plaintextCache[entry.id] { return cached }
+
+        let destination = plaintextScratch.appendingPathComponent(entry.id)
+        try fileData(for: entry).write(to: destination, options: .atomic)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: destination.path
+        )
+        plaintextCache[entry.id] = destination.path
+        return destination.path
+    }
+
+    /// Look one entry up by its SHA-1 fileID. Callers that already know a
+    /// well-known hash (sms.db, an attachment) use this to reach the decrypting
+    /// accessors instead of building the blob path by hand.
+    func entry(withFileID fileID: String) -> FileEntry? {
+        guard let rows = try? db.query(
+            "SELECT fileID, domain, relativePath, flags FROM Files WHERE fileID = ?",
+            params: [fileID]
+        ) else { return nil }
+        return rows.compactMap(parseFileEntry).first
+    }
+
+    /// The MBFile record for one entry, which carries its wrapped key and true size.
+    private func fileRecord(for fileID: String) -> BackupFileRecord? {
+        guard let rows = try? db.query("SELECT file FROM Files WHERE fileID = ?", params: [fileID]),
+              let blob = rows.first?["file"] as? Data else { return nil }
+        return BackupFileRecord(fileBlob: blob)
     }
 
     /// Get all unique domains in the backup.
@@ -235,7 +334,14 @@ final class BackupManifest {
     func fileSize(for entry: FileEntry) -> Int {
         if let cached = sizeCache[entry.id] { return cached }
         let diskPath = entry.diskPath(backupRoot: backupPath)
-        let size = (try? FileManager.default.attributesOfItem(atPath: diskPath)[.size] as? Int) ?? 0
+        // On an encrypted backup the blob on disk is padded up to the AES block
+        // size, so the manifest record is the only source of the real length.
+        let size: Int
+        if decryptor != nil, let recorded = fileRecord(for: entry.id)?.size, recorded > 0 {
+            size = recorded
+        } else {
+            size = (try? FileManager.default.attributesOfItem(atPath: diskPath)[.size] as? Int) ?? 0
+        }
         sizeCache[entry.id] = size
         return size
     }
@@ -269,7 +375,13 @@ final class BackupManifest {
         if fm.fileExists(atPath: destination) {
             try fm.removeItem(atPath: destination)
         }
-        try fm.copyItem(atPath: sourcePath, toPath: destination)
+        guard decryptor != nil else {
+            // Unencrypted: copy in place rather than reading multi-gigabyte
+            // media through memory.
+            try fm.copyItem(atPath: sourcePath, toPath: destination)
+            return
+        }
+        try fileData(for: entry).write(to: URL(fileURLWithPath: destination), options: .atomic)
     }
 
     // MARK: - Private

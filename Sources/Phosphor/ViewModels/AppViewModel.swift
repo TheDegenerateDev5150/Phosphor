@@ -37,11 +37,20 @@ final class AppViewModel: ObservableObject {
         isLoading = false
     }
 
-    func loadBackupApps(backupPath: String) {
+    /// Reading a backup's app list stats every file in every app domain, which is
+    /// seconds of work on a large backup. Keep it off the main actor so the list
+    /// can show a spinner instead of freezing.
+    func loadBackupApps(backupPath: String) async {
         isLoading = true
-        appManager.loadBackupApps(backupPath: backupPath)
+        defer { isLoading = false }
+        await appManager.loadBackupApps(backupPath: backupPath)
         backupApps = appManager.backupApps
-        isLoading = false
+        // A manifest that will not open (locked, missing, corrupt) is not the same
+        // as a backup with no apps in it. Say which.
+        if backupApps.isEmpty, let error = appManager.lastError {
+            alertMessage = error
+            showAlert = true
+        }
     }
 
     func installIPA(path: String, udid: String) async {
@@ -60,7 +69,14 @@ final class AppViewModel: ObservableObject {
 
     func extractAppData(bundleId: String, backupPath: String, to dest: String) async {
         let count = await appManager.extractAppData(bundleId: bundleId, from: backupPath, to: dest)
-        alertMessage = count > 0 ? "Extracted \(count) files" : (appManager.lastError ?? "No files extracted")
+        // A partly-skipped extraction has both a count and a reason; report both
+        // rather than letting the skip notice disappear behind a success message.
+        if count > 0 {
+            let summary = "Extracted \(count) \(count == 1 ? "file" : "files") to \(dest)."
+            alertMessage = [summary, appManager.lastError].compactMap { $0 }.joined(separator: "\n")
+        } else {
+            alertMessage = appManager.lastError ?? "No files extracted"
+        }
         showAlert = true
     }
 }

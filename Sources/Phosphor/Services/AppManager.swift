@@ -86,13 +86,34 @@ final class AppManager: ObservableObject {
 
     // MARK: - Backup Apps
 
-    func loadBackupApps(backupPath: String) {
+    func loadBackupApps(backupPath: String) async {
         isLoading = true
+        lastError = nil
+        defer { isLoading = false }
 
+        // Sizing an app domain stats every file in it, so a backup with hundreds
+        // of apps is seconds of blocking work. Do it off the main actor.
+        let result = await Task.detached(priority: .userInitiated) {
+            Self.readBackupApps(backupPath: backupPath)
+        }.value
+
+        switch result {
+        case .success(let apps):
+            backupApps = apps
+        case .failure(let message):
+            backupApps = []
+            lastError = message
+        }
+    }
+
+    private enum BackupAppsResult {
+        case success([AppBundle])
+        case failure(String)
+    }
+
+    private nonisolated static func readBackupApps(backupPath: String) -> BackupAppsResult {
         guard let manifest = PlistParser.parseManifest(backupPath) else {
-            lastError = "Failed to parse backup manifest"
-            isLoading = false
-            return
+            return .failure("Failed to parse backup manifest")
         }
 
         do {
@@ -124,12 +145,10 @@ final class AppManager: ObservableObject {
                 ))
             }
 
-            backupApps = apps.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            return .success(apps.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending })
         } catch {
-            lastError = error.localizedDescription
+            return .failure(error.localizedDescription)
         }
-
-        isLoading = false
     }
 
     // MARK: - App Installation
@@ -197,29 +216,34 @@ final class AppManager: ObservableObject {
                 fileManager: fm
             )
 
-            let extractionPlan = try files.filter(\.isFile).map { entry in
-                let destinationURL = try SafeExtractionPath.prepareDestination(
+            // Preflight every entry before writing anything, but skip the unsafe
+            // rows instead of aborting: one malformed manifest row should not cost
+            // the user the whole extraction. Rejected rows are counted and reported.
+            var extractionPlan: [(BackupManifest.FileEntry, URL)] = []
+            var rejected = 0
+            for entry in files where entry.isFile {
+                guard let destinationURL = try? SafeExtractionPath.prepareDestination(
                     root: extractionRoot,
                     relativePath: entry.relativePath,
                     fileManager: fm
-                )
-                return (entry, destinationURL)
+                ) else {
+                    rejected += 1
+                    continue
+                }
+                extractionPlan.append((entry, destinationURL))
             }
 
             var extracted = 0
             for (entry, destinationURL) in extractionPlan {
                 do {
-                    let verifiedDestination = try SafeExtractionPath.prepareDestination(
-                        root: extractionRoot,
-                        relativePath: entry.relativePath,
-                        fileManager: fm
-                    )
-                    guard verifiedDestination == destinationURL else { continue }
-                    try manifest.extractFile(entry, to: verifiedDestination.path)
+                    try manifest.extractFile(entry, to: destinationURL.path)
                     extracted += 1
                 } catch {
                     continue
                 }
+            }
+            if rejected > 0 {
+                lastError = "Skipped \(rejected) backup \(rejected == 1 ? "entry" : "entries") with an unsafe extraction path."
             }
             return extracted
         } catch {

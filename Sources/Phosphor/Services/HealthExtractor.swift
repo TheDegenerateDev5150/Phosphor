@@ -84,7 +84,7 @@ final class HealthExtractor {
                           userInfo: [NSLocalizedDescriptionKey: "healthdb_secure.sqlite not found in backup"])
         }
 
-        let filePath = entry.diskPath(backupRoot: backupPath)
+        let filePath = try manifest.readablePath(for: entry)
         guard FileManager.default.fileExists(atPath: filePath) else {
             throw NSError(domain: "Phosphor", code: 404,
                           userInfo: [NSLocalizedDescriptionKey: "Health database file not found on disk"])

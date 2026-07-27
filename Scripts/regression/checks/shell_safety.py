@@ -90,9 +90,30 @@ struct TimeoutProbe {
         try? await Task.sleep(nanoseconds: 50_000_000)
         let streamErrors = await errors.snapshot()
 
+        // Negative control: a command that finishes well inside its timeout must
+        // still report its own exit code. Without this, a mutation that reports
+        // every command as timed out passes the assertions above.
+        let fastResult = await Shell.runAsync(
+            "/bin/sh",
+            arguments: ["-c", "exit 3"],
+            timeout: 30
+        )
+        let fastStreamCode: Int32 = await withCheckedContinuation { continuation in
+            _ = Shell.runStreaming(
+                "/bin/sh",
+                arguments: ["-c", "exit 3"],
+                timeout: 30,
+                onOutput: { _ in },
+                onError: { _ in },
+                completion: { continuation.resume(returning: $0) }
+            )
+        }
+
         let asyncError = asyncResult.stderr.replacingOccurrences(of: "\n", with: " ")
         print("ASYNC|\(asyncResult.exitCode)|\(asyncElapsed)|\(asyncError)")
         print("STREAM|\(streamCode)|\(streamElapsed)|\(streamErrors.joined(separator: " "))")
+        print("FAST|\(fastResult.exitCode)|0|\(fastResult.stderr.replacingOccurrences(of: "\n", with: " "))")
+        print("FASTSTREAM|\(fastStreamCode)|0|")
     }
 }
 '''
@@ -122,6 +143,9 @@ struct TimeoutProbe {
     assert "timed out" in records["STREAM"][2].lower(), "runStreaming timeout should include a diagnostic"
     assert 0.1 <= float(records["ASYNC"][1]) < 1.5, "runAsync should complete near its timeout"
     assert 0.1 <= float(records["STREAM"][1]) < 1.5, "runStreaming should complete near its timeout"
+    assert records["FAST"][0] == "3", f"a command that finished in time must keep its own exit code, got {records['FAST'][0]}"
+    assert records["FASTSTREAM"][0] == "3", f"runStreaming must keep a completed command's exit code, got {records['FASTSTREAM'][0]}"
+    assert "timed out" not in records["FAST"][2].lower(), "a command that finished in time must not carry a timeout diagnostic"
 
 
 def test_shell_run_streaming_has_bounded_timeout_and_force_kill(root: Path) -> None:
@@ -186,13 +210,22 @@ def test_restore_captures_target_and_uses_backup_parent_with_source_udid(root: P
     backup = read(root, "Sources/Phosphor/Services/BackupManager.swift")
     assert "func restoreBackup(\n        backup: BackupInfo,\n        targetUDID: String" in backup, "restore service should accept typed source-backup metadata and an explicit target"
     assert "deletingLastPathComponent" in swift_block_after(backup, "func restoreBackup("), "restore backends need the directory containing the source-UDID folder"
-    assert "sourceUDID: backup.udid" in swift_block_after(backup, "func restoreBackup("), "cross-device restores must identify the source backup UDID"
-    assert '["-u", targetUDID, "-s", backup.udid, "restore", "--system", backupRoot]' in backup, "idevicebackup2 options must precede restore and include source/target UDIDs"
+    restore_body = swift_block_after(backup, "func restoreBackup(")
+    # The source has to be the folder name on disk. backup.udid is Info.plist's
+    # "Target Identifier", which differs from the directory name for timestamped
+    # and imported backups, and both backends open backupRoot/<source>.
+    assert "lastPathComponent" in restore_body, "restore source must be the on-disk backup folder name, not the parsed Info.plist UDID"
+    assert "sourceUDID: sourceIdentifier" in restore_body, "pymobiledevice restore must receive the folder-derived source identifier"
+    assert "sourceUDID: backup.udid" not in restore_body, "backup.udid is the Target Identifier and can name a different folder than the one the user picked"
+    assert '"-s", backup.udid' not in restore_body, "the idevicebackup2 source must be the folder name too, not the Target Identifier"
+    assert "sourceIdentifier.isEmpty" in restore_body, "an empty source identifier must abort instead of silently restoring the target onto itself"
+    assert '"-u", targetUDID, "-s", sourceIdentifier, "restore", "--system", "--reboot", backupRoot' in backup, "idevicebackup2 options must precede restore, and --reboot must match the pymobiledevice3 path and the confirmation dialog"
 
     py = read(root, "Sources/Phosphor/Utilities/PyMobileDevice.swift")
     restore = swift_block_after(py, "static func restore(")
     assert "sourceUDID: String?" in restore, "pymobiledevice restore should accept a source backup UDID"
-    assert 'args += ["--source", sourceUDID]' in restore, "pymobiledevice restore should pass --source for cross-device safety"
+    # An empty --source makes pymobiledevice3 fall back to the target's own UDID.
+    assert 'if let sourceUDID, !sourceUDID.isEmpty { args += ["--source", sourceUDID] }' in restore, "an empty source must omit --source rather than silently mean the target device"
 
     clone = read(root, "Sources/Phosphor/Services/DeviceCloneService.swift")
     assert "backup: latestBackup" in clone and "targetUDID: destinationUDID" in clone, "clone restore must keep source backup and destination device distinct"

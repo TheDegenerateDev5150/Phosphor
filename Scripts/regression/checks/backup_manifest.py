@@ -25,6 +25,14 @@ def test_manifest_open_preflights_encrypted_and_missing_backups(root: Path) -> N
     src = read(root, "Sources/Phosphor/Utilities/BackupManifest.swift")
     assert "case manifestMissing" in src, "missing Manifest.db should have a typed user-facing error"
     assert "case backupEncrypted" in src, "encrypted backup should have a typed user-facing error"
-    assert "PlistParser.parseManifest(backupPath), plist.isEncrypted" in src, "Manifest.plist encryption should be checked before sqlite open"
+    assert "PlistParser.parseManifest(backupPath)?.isEncrypted" in src, "Manifest.plist encryption should be checked before sqlite open"
     assert "SQLite format 3" in src, "Manifest.db header should be preflighted before sqlite open"
     assert "case manifestUnreadable" in src, "unreadable Manifest.db should preserve the underlying error"
+    # An encrypted backup is only an error when it has not been unlocked this
+    # session. Once unlocked, the manifest serves plaintext and every consumer
+    # (Messages, Photos, Apps, Notes, Contacts, Calendar, Safari, Health, WhatsApp)
+    # keeps working without its own password prompt.
+    assert "BackupUnlockStore.shared.decryptor(for: backupPath)" in src, "an unlocked backup must open instead of throwing backupEncrypted"
+    assert "throw ManifestError.backupEncrypted" in src, "a locked backup must still surface the typed encrypted error"
+    assert "func fileData(for entry: FileEntry) throws -> Data" in src, "blob reads must go through a decrypting accessor"
+    assert "func readablePath(for entry: FileEntry) throws -> String" in src, "path-based readers need a decrypted copy, not the raw ciphertext blob"

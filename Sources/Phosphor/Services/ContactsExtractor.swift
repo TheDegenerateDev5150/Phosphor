@@ -39,14 +39,16 @@ final class ContactsExtractor {
     func getContacts() throws -> [Contact] {
         // AddressBook.sqlitedb hash: 31bb7ba8914766d4ba40d6dfb6113c8b614be442
         let knownHash = "31bb7ba8914766d4ba40d6dfb6113c8b614be442"
-        var dbPath = "\(backupPath)/\(knownHash.prefix(2))/\(knownHash)"
+        // On an encrypted backup that blob is ciphertext, so its presence proves
+        // nothing. Force the manifest lookup, which decrypts.
+        var dbPath = manifest.isDecrypting ? "" : "\(backupPath)/\(knownHash.prefix(2))/\(knownHash)"
 
         // Fallback: search manifest
         if !FileManager.default.fileExists(atPath: dbPath) {
             guard let entry = try manifest.files(matching: "%AddressBook.sqlitedb").first(where: { $0.domain == "HomeDomain" }) else {
                 throw NSError(domain: "Phosphor", code: 404, userInfo: [NSLocalizedDescriptionKey: "AddressBook database not found in backup"])
             }
-            dbPath = entry.diskPath(backupRoot: backupPath)
+            dbPath = try manifest.readablePath(for: entry)
         }
 
         let db = try SQLiteReader(path: dbPath)
@@ -112,11 +114,13 @@ final class ContactsExtractor {
     /// Get contact count without loading all data.
     func getContactCount() throws -> Int {
         let knownHash = "31bb7ba8914766d4ba40d6dfb6113c8b614be442"
-        var dbPath = "\(backupPath)/\(knownHash.prefix(2))/\(knownHash)"
+        // On an encrypted backup that blob is ciphertext, so its presence proves
+        // nothing. Force the manifest lookup, which decrypts.
+        var dbPath = manifest.isDecrypting ? "" : "\(backupPath)/\(knownHash.prefix(2))/\(knownHash)"
 
         if !FileManager.default.fileExists(atPath: dbPath) {
             guard let entry = try manifest.files(matching: "%AddressBook.sqlitedb").first(where: { $0.domain == "HomeDomain" }) else { return 0 }
-            dbPath = entry.diskPath(backupRoot: backupPath)
+            dbPath = try manifest.readablePath(for: entry)
         }
 
         guard let db = try? SQLiteReader(path: dbPath) else { return 0 }

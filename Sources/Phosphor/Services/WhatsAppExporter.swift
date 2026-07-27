@@ -77,7 +77,7 @@ final class WhatsAppExporter {
 
         // Try AppDomainGroup first (newer WhatsApp versions)
         if let entry = try manifest.whatsAppDatabase() {
-            let filePath = entry.diskPath(backupRoot: backupPath)
+            let filePath = try manifest.readablePath(for: entry)
             guard FileManager.default.fileExists(atPath: filePath) else {
                 throw NSError(domain: "Phosphor", code: 404,
                               userInfo: [NSLocalizedDescriptionKey: "WhatsApp database file not found on disk"])
@@ -89,7 +89,7 @@ final class WhatsAppExporter {
         // Try direct search
         let candidates = try manifest.search("ChatStorage.sqlite")
         for candidate in candidates where candidate.isFile {
-            let filePath = candidate.diskPath(backupRoot: backupPath)
+            let filePath = try manifest.readablePath(for: candidate)
             if FileManager.default.fileExists(atPath: filePath) {
                 try self.init(databasePath: filePath)
                 return

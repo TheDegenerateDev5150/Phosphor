@@ -31,6 +31,12 @@ struct ContentView: View {
                 toolbarItems
             }
         }
+        // Presented at the root so every entry point into a backup - Backups,
+        // Messages, Photos, Apps, the time machine - gets the same prompt.
+        .sheet(item: $backupVM.pendingUnlock) { backup in
+            BackupUnlockSheet(backup: backup)
+                .environmentObject(backupVM)
+        }
         .task {
             // Defer process probing until after first paint.
             try? await Task.sleep(for: .milliseconds(750))

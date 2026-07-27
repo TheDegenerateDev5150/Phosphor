@@ -368,11 +368,30 @@ final class MessageViewModel: ObservableObject {
             return .permissionDenied("Backup folder is not readable.")
         }
 
-        if let manifest = PlistParser.parseManifest(backupPath), manifest.isEncrypted {
+        let isEncrypted = PlistParser.parseManifest(backupPath)?.isEncrypted ?? false
+        if isEncrypted && !BackupUnlockStore.shared.isUnlocked(backupPath) {
             return .encryptedBackup
         }
 
-        let sms = "\(backupPath)/3d/\(MessageExporter.smsDbHash)"
+        // An unlocked backup has to be probed through the manifest: the blob on
+        // disk is ciphertext, so a direct SQLiteReader would report a corrupt
+        // database rather than a readable one.
+        // Keep the manifest alive for the whole probe: its scratch directory holds
+        // the decrypted sms.db and is removed the moment the instance is released.
+        var unlockedManifest: BackupManifest?
+        let sms: String
+        if isEncrypted {
+            guard let manifest = try? BackupManifest(backupPath: backupPath),
+                  let entry = manifest.entry(withFileID: MessageExporter.smsDbHash),
+                  let path = try? manifest.readablePath(for: entry) else {
+                return .noMessagesDatabase
+            }
+            unlockedManifest = manifest
+            sms = path
+        } else {
+            sms = "\(backupPath)/3d/\(MessageExporter.smsDbHash)"
+        }
+        defer { withExtendedLifetime(unlockedManifest) {} }
         guard fm.fileExists(atPath: sms) else {
             return .noMessagesDatabase
         }

@@ -761,8 +761,11 @@ enum PyMobileDevice {
         var args = ["backup2", "restore"]
         if system { args.append("--system") }
         if reboot { args.append("--reboot") }
-        if let udid { args += ["--udid", udid] }
-        if let sourceUDID { args += ["--source", sourceUDID] }
+        if let udid, !udid.isEmpty { args += ["--udid", udid] }
+        // An empty --source is worse than none: pymobiledevice3 falls back to the
+        // target device's own UDID, quietly turning a cross-device restore into a
+        // same-device one. Omitting the flag makes that fallback explicit.
+        if let sourceUDID, !sourceUDID.isEmpty { args += ["--source", sourceUDID] }
         args.append(directory)
 
         return runStreaming(args, timeout: timeout, onOutput: onOutput, completion: completion)

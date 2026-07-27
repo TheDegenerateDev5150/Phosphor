@@ -52,7 +52,7 @@ final class SafariExtractor {
                           userInfo: [NSLocalizedDescriptionKey: "Safari Bookmarks.db not found"])
         }
 
-        let filePath = entry.diskPath(backupRoot: backupPath)
+        let filePath = try manifest.readablePath(for: entry)
         guard FileManager.default.fileExists(atPath: filePath) else {
             throw NSError(domain: "Phosphor", code: 404,
                           userInfo: [NSLocalizedDescriptionKey: "Bookmarks database file not found on disk"])
@@ -97,7 +97,7 @@ final class SafariExtractor {
                           userInfo: [NSLocalizedDescriptionKey: "Safari History.db not found"])
         }
 
-        let filePath = entry.diskPath(backupRoot: backupPath)
+        let filePath = try manifest.readablePath(for: entry)
         guard FileManager.default.fileExists(atPath: filePath) else {
             throw NSError(domain: "Phosphor", code: 404,
                           userInfo: [NSLocalizedDescriptionKey: "History database file not found on disk"])

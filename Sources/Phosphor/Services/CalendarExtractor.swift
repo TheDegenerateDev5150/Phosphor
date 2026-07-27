@@ -175,13 +175,15 @@ final class CalendarExtractor {
     private func openDatabase() throws -> SQLiteReader {
         // Calendar.sqlitedb known hash
         let knownHash = "2041457d5fe04f8a8d0141078f3a780f24edd0a3"
-        var dbPath = "\(backupPath)/\(knownHash.prefix(2))/\(knownHash)"
+        // On an encrypted backup that blob is ciphertext, so its presence proves
+        // nothing. Force the manifest lookup, which decrypts.
+        var dbPath = manifest.isDecrypting ? "" : "\(backupPath)/\(knownHash.prefix(2))/\(knownHash)"
 
         if !FileManager.default.fileExists(atPath: dbPath) {
             guard let entry = try manifest.files(matching: "%Calendar.sqlitedb").first(where: { $0.domain == "HomeDomain" }) else {
                 throw NSError(domain: "Phosphor", code: 404, userInfo: [NSLocalizedDescriptionKey: "Calendar database not found in backup"])
             }
-            dbPath = entry.diskPath(backupRoot: backupPath)
+            dbPath = try manifest.readablePath(for: entry)
         }
 
         return try SQLiteReader(path: dbPath)

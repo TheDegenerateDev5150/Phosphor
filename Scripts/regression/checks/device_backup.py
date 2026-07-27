@@ -155,19 +155,23 @@ def test_device_polling_prefers_lightweight_discovery_before_python_fallback(roo
     assert_contains(manager, "compatibilityOnlyDeviceEntries = pyEntries.filter", "compatibility cache should exclude devices already covered by lightweight discovery")
     assert_contains(manager, "lightweightScan.entries + compatibilityOnlyDeviceEntries", "every routine poll should merge cached compatibility-only devices")
 
-    compatibility_cache: list[str] = []
-
-    def poll(lightweight: list[str], compatibility: list[str] | None = None) -> list[str]:
-        nonlocal compatibility_cache
-        if compatibility is not None:
-            lightweight_ids = set(lightweight)
-            compatibility_cache = [item for item in compatibility if item not in lightweight_ids]
-        return list(dict.fromkeys(lightweight + compatibility_cache))
-
-    assert poll([], ["py-only"]) == ["py-only"], "compatibility discovery should publish a pymobiledevice-only device"
-    assert poll([]) == ["py-only"], "intervening lightweight polls should retain a pymobiledevice-only device"
-    assert poll([], []) == [], "a later compatibility scan should remove devices no longer discovered"
-    assert poll(["native"], ["native", "py-only"]) == ["native", "py-only"], "cache should retain only compatibility-exclusive entries"
+    # Pin the actual predicate and the merge expression. Asserting against a Python
+    # restatement of the intended semantics stays green no matter what the Swift does.
+    assert_contains(
+        manager,
+        "compatibilityOnlyDeviceEntries = pyEntries.filter { !lightweightIDs.contains($0.udid) }",
+        "the compatibility cache must keep the devices lightweight discovery MISSED, not the ones it already found",
+    )
+    # A failed idevice_id probe yields an empty UDID set, so the subtraction above is
+    # a no-op and would cache every USB device as compatibility-only, republishing
+    # them as duplicate rows for a full interval once the probe recovers.
+    assert_contains(manager, "if lightweightScan.isAvailable {", "the compatibility cache may only be refreshed from a scan whose lightweight probe succeeded")
+    assert_contains(manager, "compatibilityOnlyDeviceEntries = []", "a failed lightweight probe must clear the compatibility cache instead of poisoning it")
+    assert_contains(manager, "entries = mergeDeviceEntries(pyEntries)", "when the lightweight probe fails, the pymobiledevice snapshot is the whole picture for that poll")
+    # Date() here would hide pymobiledevice-only devices for the first full interval
+    # after launch, which is exactly what this discovery path promises to prevent.
+    assert_contains(manager, "lastCompatibilityDiscoveryAt = Date.distantPast", "the first poll after launch must run a compatibility scan, not wait out the interval")
+    assert_not_contains(manager, "isAvailable: usb.succeeded && network.succeeded", "requiring the -n probe to succeed disables the optimization on builds whose idevice_id rejects it")
 
 
 def test_wifi_schedules_use_network_discovery_and_network_backup_flag(root: Path) -> None:
@@ -325,12 +329,17 @@ def test_file_browser_delete_requires_confirmation_and_blocks_directories(root: 
 
 def test_backup_extract_preserves_domain_relative_paths(root: Path) -> None:
     manager = read(root, "Sources/Phosphor/Services/BackupManager.swift")
-    assert_contains(manager, "private func extractionDestination(for entry", "Backup extraction should centralize safe destination path construction")
-    assert_contains(manager, "appendingPathComponent(safeDomain)", "Backup extraction should group files by domain to avoid basename collisions")
+    assert_contains(manager, "private func extractionRelativePath(for entry", "Backup extraction should centralize safe destination path construction")
+    assert_contains(manager, "components = [safeDomain]", "Backup extraction should group files by domain to avoid basename collisions")
     assert_contains(manager, "entry.relativePath", "Backup extraction should preserve manifest relative paths instead of flattening to fileName")
     assert_contains(manager, 'safeDomain == "." || safeDomain == ".."', "Selective extraction must neutralize traversal domains so a crafted manifest row cannot escape the destination")
     assert_contains(manager, "Refusing to extract", "Selective extraction should refuse to write outside the destination folder")
     assert_not_contains(manager, "appendingPathComponent(entry.fileName)\n            do {", "Backup extraction should not flatten every selected file to destination/fileName")
+    # Lexical sanitization cannot see a symlink that already exists in the chosen
+    # folder; extractFile creates missing parents with withIntermediateDirectories,
+    # which follows one. Selective extraction has to go through the shared resolver.
+    assert_contains(manager, "SafeExtractionPath.prepareDestination", "Selective extraction must resolve destinations through SafeExtractionPath, not string joins")
+    assert_not_contains(manager, "standardized.hasPrefix(destinationRoot)", "Prefix comparison against a root without a trailing separator also matches sibling directories")
 
 
 def test_live_photo_exports_use_path_based_names(root: Path) -> None:

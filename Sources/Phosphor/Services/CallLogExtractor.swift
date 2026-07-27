@@ -18,7 +18,7 @@ final class CallLogExtractor {
         // Try modern CallHistory.storedata first
         let candidates = try manifest.search("CallHistory.storedata")
         if let entry = candidates.first(where: { $0.isFile }) {
-            let filePath = entry.diskPath(backupRoot: backupPath)
+            let filePath = try manifest.readablePath(for: entry)
             if FileManager.default.fileExists(atPath: filePath) {
                 try self.init(databasePath: filePath)
                 return
@@ -28,7 +28,7 @@ final class CallLogExtractor {
         // Try legacy call_history.db
         let legacy = try manifest.search("call_history.db")
         if let entry = legacy.first(where: { $0.isFile }) {
-            let filePath = entry.diskPath(backupRoot: backupPath)
+            let filePath = try manifest.readablePath(for: entry)
             if FileManager.default.fileExists(atPath: filePath) {
                 try self.init(databasePath: filePath)
                 return

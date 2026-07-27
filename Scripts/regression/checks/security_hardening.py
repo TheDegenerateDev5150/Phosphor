@@ -57,6 +57,18 @@ def test_app_extraction_rejects_traversal_and_symlink_components(root: Path) -> 
 
     app_view_model = read(root, "Sources/Phosphor/ViewModels/AppViewModel.swift")
     assert 'appManager.lastError ?? "No files extracted"' in app_view_model, "unsafe-path failures should be shown instead of a generic empty result"
+    # One malformed manifest row should cost that row, not the whole extraction.
+    assert "rejected += 1" in app_manager, "app extraction should skip unsafe entries and report the count, not abort the whole run"
+
+    # Every sink that consumes a manifest-controlled path needs the same boundary.
+    # Leaving one unguarded makes the fix cosmetic: a crafted backup just uses the
+    # other one.
+    for path, why in [
+        ("Sources/Phosphor/Services/AppleWatchExtractor.swift", "the Watch extractor joins a manifest-controlled domain onto the chosen folder"),
+        ("Sources/Phosphor/Services/PhotoExtractor.swift", "the photo extractor joins a manifest-controlled relativePath in its preserveStructure branch"),
+        ("Sources/Phosphor/Services/BackupManager.swift", "selective backup extraction creates intermediate directories, which follows a planted symlink"),
+    ]:
+        assert "SafeExtractionPath.prepareDestination" in read(root, path), f"{path} must resolve destinations through SafeExtractionPath: {why}"
 
     probe = r'''
 import Foundation
@@ -101,13 +113,27 @@ struct SafePathProbe {
             }
         }
 
+        // A symlink sitting at the LEAF destination is the case a prefix check
+        // cannot see: the path stays inside the root but the write lands wherever
+        // the link points. Cover both a live link and a dangling one.
+        try fm.createSymbolicLink(
+            at: extractionRoot.appendingPathComponent("leaf-link.txt"),
+            withDestinationURL: outside.appendingPathComponent("victim.txt")
+        )
+        try fm.createSymbolicLink(
+            at: extractionRoot.appendingPathComponent("dangling-link.txt"),
+            withDestinationURL: outside.appendingPathComponent("does-not-exist.txt")
+        )
+
         let unsafe = [
             "",
             "/tmp/absolute.txt",
             "../victim.txt",
             "Documents/../../victim.txt",
             "Documents/./file.txt",
-            "linked/victim.txt"
+            "linked/victim.txt",
+            "leaf-link.txt",
+            "dangling-link.txt"
         ]
         for path in unsafe {
             do {

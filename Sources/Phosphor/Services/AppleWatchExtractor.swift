@@ -159,8 +159,8 @@ final class AppleWatchExtractor {
     /// Extract Activity ring summaries from Health database.
     func getActivitySummaries() -> [WatchActivitySummary] {
         // Primary: search manifest for healthdb_secure
-        if let entry = try? manifest.files(matching: "%healthdb_secure%").first {
-            let path = entry.diskPath(backupRoot: backupPath)
+        if let entry = try? manifest.files(matching: "%healthdb_secure%").first,
+           let path = try? manifest.readablePath(for: entry) {
             if FileManager.default.fileExists(atPath: path) {
                 return loadActivityFromDB(path)
             }
@@ -171,10 +171,15 @@ final class AppleWatchExtractor {
             "cc61d40c8de1653f24ef0e0dd4e7e08abab7ff42",
             "6a3a8e5c6e3b8e1d2f4a0c9b7e5d3f1a8c6b4e2d"
         ]
-        for hash in knownHashes {
-            let dbPath = "\(backupPath)/\(hash.prefix(2))/\(hash)"
-            if FileManager.default.fileExists(atPath: dbPath) {
-                return loadActivityFromDB(dbPath)
+        // Skipped on an encrypted backup: the blob is present but is ciphertext,
+        // so a hit here would hand SQLite garbage. The manifest lookup above is
+        // the only correct path in that case.
+        if !manifest.isDecrypting {
+            for hash in knownHashes {
+                let dbPath = "\(backupPath)/\(hash.prefix(2))/\(hash)"
+                if FileManager.default.fileExists(atPath: dbPath) {
+                    return loadActivityFromDB(dbPath)
+                }
             }
         }
 
@@ -242,16 +247,21 @@ final class AppleWatchExtractor {
 
         var extracted = 0
         let fm = FileManager.default
+        // Domain and file name both come out of Manifest.db, so neither is trusted
+        // input. Route them through the shared resolver rather than joining them
+        // onto the user's chosen folder directly.
+        let root = URL(fileURLWithPath: destination, isDirectory: true)
 
         for domain in watchDomains {
-            let domainDir = (destination as NSString).appendingPathComponent(domain)
-            try fm.createDirectory(atPath: domainDir, withIntermediateDirectories: true)
-
             let files = (try? manifest.files(inDomain: domain)) ?? []
             for file in files where file.isFile {
-                let destPath = (domainDir as NSString).appendingPathComponent(file.fileName)
+                guard let destination = try? SafeExtractionPath.prepareDestination(
+                    root: root,
+                    relativePath: "\(domain)/\(file.fileName)",
+                    fileManager: fm
+                ) else { continue }
                 do {
-                    try manifest.extractFile(file, to: destPath)
+                    try manifest.extractFile(file, to: destination.path)
                     extracted += 1
                 } catch {
                     continue
@@ -265,9 +275,7 @@ final class AppleWatchExtractor {
     // MARK: - Helpers
 
     private func parseWatchPlist(_ entry: BackupManifest.FileEntry) -> WatchInfo? {
-        let diskPath = entry.diskPath(backupRoot: backupPath)
-        guard FileManager.default.fileExists(atPath: diskPath),
-              let data = FileManager.default.contents(atPath: diskPath),
+        guard let data = try? manifest.fileData(for: entry),
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
             return nil
         }

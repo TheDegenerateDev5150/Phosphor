@@ -19,7 +19,10 @@ final class DeviceManager: ObservableObject {
     private var pairStatusCache: [String: (isPaired: Bool, fetchedAt: Date)] = [:]
     private var bonjourDeviceCache: (devices: [PyMobileDevice.BonjourDevice], fetchedAt: Date)?
     private var compatibilityOnlyDeviceEntries: [PyMobileDevice.DeviceEntry] = []
-    private var lastCompatibilityDiscoveryAt = Date()
+    // distantPast, not Date(): the first poll after launch has to run the
+    // pymobiledevice3 scan, otherwise a device only it can enumerate stays
+    // invisible for the whole first compatibility interval.
+    private var lastCompatibilityDiscoveryAt = Date.distantPast
     private let deviceInfoRefreshInterval: TimeInterval = 30
     private let batteryInfoRefreshInterval: TimeInterval = 60
     private let pairStatusRefreshInterval: TimeInterval = 120
@@ -62,13 +65,25 @@ final class DeviceManager: ObservableObject {
         // idevice_id transports retain the full pymobiledevice3 compatibility path.
         let lightweightScan = await listLibimobiledeviceEntries()
         let compatibilityScanIsDue = Date().timeIntervalSince(lastCompatibilityDiscoveryAt) >= compatibilityDiscoveryInterval
+        let entries: [PyMobileDevice.DeviceEntry]
         if forceRefresh || !lightweightScan.isAvailable || compatibilityScanIsDue {
             lastCompatibilityDiscoveryAt = Date()
             let pyEntries = await PyMobileDevice.listDevicesWithType()
-            let lightweightIDs = Set(lightweightScan.entries.map(\.udid))
-            compatibilityOnlyDeviceEntries = pyEntries.filter { !lightweightIDs.contains($0.udid) }
+            if lightweightScan.isAvailable {
+                let lightweightIDs = Set(lightweightScan.entries.map(\.udid))
+                compatibilityOnlyDeviceEntries = pyEntries.filter { !lightweightIDs.contains($0.udid) }
+                entries = mergeDeviceEntries(lightweightScan.entries + compatibilityOnlyDeviceEntries)
+            } else {
+                // The probe failed, so its UDID set is empty and cannot subtract
+                // duplicates. pyEntries is already the whole picture for this poll;
+                // caching it as compatibility-only would republish every USB device
+                // as a phantom row for the next 30s once the probe recovers.
+                compatibilityOnlyDeviceEntries = []
+                entries = mergeDeviceEntries(pyEntries)
+            }
+        } else {
+            entries = mergeDeviceEntries(lightweightScan.entries + compatibilityOnlyDeviceEntries)
         }
-        let entries = mergeDeviceEntries(lightweightScan.entries + compatibilityOnlyDeviceEntries)
 
         if entries.isEmpty {
             let bonjourDevices = await cachedBonjourDevices(forceRefresh: forceRefresh)
@@ -147,8 +162,13 @@ final class DeviceManager: ObservableObject {
             entries += parseLibimobiledeviceUDIDs(network.output, connectionType: "Network")
         }
 
+        // Availability keys on the USB probe alone. Some libimobiledevice builds
+        // ship an idevice_id that rejects -n, and requiring both to exit 0 would
+        // make every poll fall through to pymobiledevice3 forever, which is the
+        // cost this path exists to avoid. Network-only devices are still picked up
+        // by the periodic compatibility scan.
         return LibimobiledeviceScan(
-            isAvailable: usb.succeeded && network.succeeded,
+            isAvailable: usb.succeeded,
             entries: mergeDeviceEntries(entries)
         )
     }

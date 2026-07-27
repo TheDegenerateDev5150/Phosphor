@@ -77,11 +77,11 @@ enum SafeExtractionPath {
                 throw PathError.unsafePath
             }
 
-            var isDirectory: ObjCBool = false
-            if fileManager.fileExists(atPath: candidate.path, isDirectory: &isDirectory) {
-                let attributes = try fileManager.attributesOfItem(atPath: candidate.path)
-                guard attributes[.type] as? FileAttributeType != .typeSymbolicLink,
-                      isDirectory.boolValue else {
+            // attributesOfItem does not follow symlinks, so it still reports a
+            // dangling link as present. fileExists does follow, and would report
+            // a dangling link as absent - see the leaf check below.
+            if let attributes = try? fileManager.attributesOfItem(atPath: candidate.path) {
+                guard attributes[.type] as? FileAttributeType == .typeDirectory else {
                     throw PathError.unsafePath
                 }
             } else {
@@ -95,8 +95,11 @@ enum SafeExtractionPath {
             throw PathError.unsafePath
         }
 
-        if fileManager.fileExists(atPath: destination.path) {
-            let attributes = try fileManager.attributesOfItem(atPath: destination.path)
+        // fileExists resolves symlinks, so a link pointing at a path that does not
+        // exist yet reads as "absent" and skips this check entirely. The write then
+        // follows the link and lands outside the root. attributesOfItem is lstat
+        // based, so a dangling link is still seen and rejected.
+        if let attributes = try? fileManager.attributesOfItem(atPath: destination.path) {
             guard attributes[.type] as? FileAttributeType != .typeSymbolicLink,
                   attributes[.type] as? FileAttributeType != .typeDirectory else {
                 throw PathError.unsafePath

@@ -107,7 +107,7 @@ final class NotesExtractor {
             throw NotesError.notFound
         }
 
-        let filePath = entry.diskPath(backupRoot: backupPath)
+        let filePath = try manifest.readablePath(for: entry)
         guard FileManager.default.fileExists(atPath: filePath) else {
             throw NotesError.fileMissing(path: filePath)
         }

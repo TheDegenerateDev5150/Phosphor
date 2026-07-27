@@ -839,15 +839,27 @@ final class BackupManager: ObservableObject {
         targetUDID: String,
         onProgress: @escaping (String) -> Void
     ) async -> Bool {
-        let operationID = beginCancellableOperation()
+        // Both backends open `backupRoot/<source>`, so the source has to be the
+        // folder name on disk. It is NOT backup.udid: that comes from Info.plist's
+        // "Target Identifier", and timestamped or imported backup folders routinely
+        // have a directory name that differs from it. Deriving both halves from
+        // backup.path keeps `backupRoot + source == backup.path` true by construction,
+        // which is what stops a restore from silently targeting another snapshot.
         let backupRoot = (backup.path as NSString).deletingLastPathComponent
+        let sourceIdentifier = (backup.path as NSString).lastPathComponent
+        guard !sourceIdentifier.isEmpty, !backupRoot.isEmpty else {
+            lastError = "Cannot restore: \(backup.path) is not a backup folder inside a backup directory."
+            return false
+        }
+
+        let operationID = beginCancellableOperation()
         // Primary: pymobiledevice3
         if PyMobileDevice.available() {
             return await withCheckedContinuation { continuation in
                 activeProcess = PyMobileDevice.restore(
                     directory: backupRoot,
                     udid: targetUDID,
-                    sourceUDID: backup.udid,
+                    sourceUDID: sourceIdentifier,
                     timeout: Self.streamingRestoreTimeout,
                     onOutput: { output in onProgress(output) },
                     completion: { [weak self] exitCode in
@@ -873,7 +885,10 @@ final class BackupManager: ObservableObject {
         return await withCheckedContinuation { continuation in
             activeProcess = Shell.runStreaming(
                 "idevicebackup2",
-                arguments: ["-u", targetUDID, "-s", backup.udid, "restore", "--system", backupRoot],
+                // Global options first, then the subcommand, then its options. The
+                // --reboot matches the pymobiledevice3 path and the confirmation
+                // dialog, which both tell the user the device restarts.
+                arguments: ["-u", targetUDID, "-s", sourceIdentifier, "restore", "--system", "--reboot", backupRoot],
                 timeout: Self.streamingRestoreTimeout,
                 onOutput: { output in onProgress(output) },
                 onError: { _ in },
@@ -923,7 +938,10 @@ final class BackupManager: ObservableObject {
 
     // MARK: - Selective Extract
 
-    private func extractionDestination(for entry: BackupManifest.FileEntry, under destination: String) -> String {
+    /// Build the destination path for one manifest entry, relative to the folder
+    /// the user chose. Returned as a relative path so the caller can resolve it
+    /// through SafeExtractionPath, which is what actually enforces the boundary.
+    private func extractionRelativePath(for entry: BackupManifest.FileEntry) -> String {
         var safeDomain = entry.domain
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: ":", with: "_")
@@ -933,20 +951,17 @@ final class BackupManager: ObservableObject {
         if safeDomain == "." || safeDomain == ".." || safeDomain.isEmpty {
             safeDomain = "_"
         }
+        var components = [safeDomain]
         let relativeComponents = entry.relativePath
             .split(separator: "/")
             .map(String.init)
             .filter { !$0.isEmpty && $0 != "." && $0 != ".." }
-
-        var path = (destination as NSString).appendingPathComponent(safeDomain)
-        for component in relativeComponents {
-            path = (path as NSString).appendingPathComponent(component)
-        }
+        components += relativeComponents
 
         if relativeComponents.isEmpty || entry.relativePath.hasSuffix("/") {
-            path = (path as NSString).appendingPathComponent(entry.fileName)
+            components.append(entry.fileName)
         }
-        return path
+        return components.joined(separator: "/")
     }
 
     func extractFiles(
@@ -957,21 +972,24 @@ final class BackupManager: ObservableObject {
         let manifest = try BackupManifest(backupPath: backup.path)
         var extracted = 0
 
-        let destinationRoot = ((destination as NSString).standardizingPath as NSString)
-            .appendingPathComponent("")
+        // Lexical sanitization alone is not enough: extractFile creates missing
+        // parents with withIntermediateDirectories, which follows a symlink already
+        // sitting in the chosen folder and writes straight through it. SafeExtractionPath
+        // rejects symlinked components and re-checks containment against the resolved root.
+        let root = URL(fileURLWithPath: destination, isDirectory: true)
+        let fm = FileManager.default
 
         for entry in entries where entry.isFile {
-            let destPath = extractionDestination(for: entry, under: destination)
-            // Defense in depth: never write outside the chosen destination even if a
-            // manifest row slipped a traversal token past sanitization.
-            let standardized = (destPath as NSString).standardizingPath
-            guard standardized == (destination as NSString).standardizingPath
-                    || standardized.hasPrefix(destinationRoot) else {
+            guard let destination = try? SafeExtractionPath.prepareDestination(
+                root: root,
+                relativePath: extractionRelativePath(for: entry),
+                fileManager: fm
+            ) else {
                 lastError = "Refusing to extract \(entry.fileName) outside the destination folder."
                 continue
             }
             do {
-                try manifest.extractFile(entry, to: destPath)
+                try manifest.extractFile(entry, to: destination.path)
                 extracted += 1
             } catch {
                 lastError = "Failed to extract \(entry.fileName): \(error.localizedDescription)"

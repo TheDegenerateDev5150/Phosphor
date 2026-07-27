@@ -46,8 +46,21 @@ final class MessageExporter {
     /// filesystem existence checks for large attachment-heavy conversations.
     private var attachmentDiskPathCache: [String: String] = [:]
     private var missingAttachmentDiskPaths: Set<String> = []
+    /// Held for the exporter's lifetime when the backup is encrypted and unlocked.
+    /// sms.db and every attachment resolve through it, and its scratch directory
+    /// has to outlive the paths it hands out.
+    private let unlockedManifest: BackupManifest?
 
-    init(databasePath: String, backupPath: String? = nil, contacts: ContactDirectory = .empty) throws {
+    init(
+        databasePath: String,
+        backupPath: String? = nil,
+        contacts: ContactDirectory = .empty,
+        unlockedManifest: BackupManifest? = nil
+    ) throws {
+        // Take ownership of the caller's manifest when there is one. Its scratch
+        // directory is removed on deinit, so the instance that produced
+        // databasePath has to be the instance this exporter keeps alive.
+        self.unlockedManifest = unlockedManifest ?? backupPath.flatMap(Self.unlockedManifest(for:))
         self.db = try SQLiteReader(path: databasePath)
         self.backupPath = backupPath
         self.contacts = contacts
@@ -57,18 +70,48 @@ final class MessageExporter {
         self.messageColumns = Set(messageCols.map { $0.name })
     }
 
+    /// Open the manifest only when this backup is encrypted and already unlocked.
+    /// An unencrypted backup keeps reading blobs straight off disk, which avoids
+    /// paying for a manifest open on the common path.
+    private static func unlockedManifest(for backupPath: String) -> BackupManifest? {
+        guard BackupUnlockStore.shared.isUnlocked(backupPath) else { return nil }
+        return try? BackupManifest(backupPath: backupPath)
+    }
+
+    /// Resolve a well-known backup hash to a readable path, decrypting if needed.
+    private static func readablePath(
+        forHash hash: String,
+        backupPath: String,
+        manifest: BackupManifest?
+    ) -> String? {
+        if let manifest,
+           let entry = manifest.entry(withFileID: hash),
+           let path = try? manifest.readablePath(for: entry) {
+            return path
+        }
+        let direct = "\(backupPath)/\(String(hash.prefix(2)))/\(hash)"
+        return FileManager.default.fileExists(atPath: direct) ? direct : nil
+    }
+
     /// Initialize from a backup directory by locating the sms.db.
     convenience init(backupPath: String, contacts: ContactDirectory = .empty) throws {
         // The sms.db file is stored as its SHA-1 hash in a two-character prefixed subdirectory
-        let hashPrefix = String(Self.smsDbHash.prefix(2))
-        let smsPath = "\(backupPath)/\(hashPrefix)/\(Self.smsDbHash)"
-
-        guard FileManager.default.fileExists(atPath: smsPath) else {
+        let manifest = Self.unlockedManifest(for: backupPath)
+        guard let smsPath = Self.readablePath(
+            forHash: Self.smsDbHash,
+            backupPath: backupPath,
+            manifest: manifest
+        ) else {
             throw NSError(domain: "Phosphor", code: 404,
-                          userInfo: [NSLocalizedDescriptionKey: "sms.db not found in backup. Is this an unencrypted backup?"])
+                          userInfo: [NSLocalizedDescriptionKey: "sms.db not found in backup. If the backup is encrypted, unlock it with its password first."])
         }
 
-        try self.init(databasePath: smsPath, backupPath: backupPath, contacts: contacts)
+        try self.init(
+            databasePath: smsPath,
+            backupPath: backupPath,
+            contacts: contacts,
+            unlockedManifest: manifest
+        )
     }
 
     // MARK: - Conversations
@@ -407,8 +450,11 @@ final class MessageExporter {
         // SHA-1 of "MediaDomain-<relative>" is the on-disk filename.
         let domainKey = "MediaDomain-\(relative)"
         let hash = MessageExporter.sha1Hex(domainKey)
-        let candidate = "\(backupPath)/\(String(hash.prefix(2)))/\(hash)"
-        if FileManager.default.fileExists(atPath: candidate) {
+        if let candidate = MessageExporter.readablePath(
+            forHash: hash,
+            backupPath: backupPath,
+            manifest: unlockedManifest
+        ) {
             attachmentDiskPathCache[filename] = candidate
             return candidate
         }

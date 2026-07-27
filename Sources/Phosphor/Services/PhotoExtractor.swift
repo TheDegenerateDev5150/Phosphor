@@ -60,18 +60,22 @@ final class PhotoExtractor: ObservableObject {
                     size: item.size
                 )
 
-                let destPath: String
-                if preserveStructure {
-                    destPath = (destination as NSString).appendingPathComponent(item.relativePath)
-                } else {
-                    destPath = (destination as NSString).appendingPathComponent(item.filename)
-                }
+                // relativePath and filename are manifest-controlled, so both branches
+                // resolve through the shared boundary check instead of being joined
+                // onto the destination directly.
+                let destPath = try? SafeExtractionPath.prepareDestination(
+                    root: URL(fileURLWithPath: destination, isDirectory: true),
+                    relativePath: preserveStructure ? item.relativePath : item.filename,
+                    fileManager: fm
+                )
 
-                do {
-                    try manifest.extractFile(entry, to: destPath)
-                    extracted += 1
-                } catch {
-                    // Skip files that can't be extracted, continue with others
+                if let destPath {
+                    do {
+                        try manifest.extractFile(entry, to: destPath.path)
+                        extracted += 1
+                    } catch {
+                        // Skip files that can't be extracted, continue with others
+                    }
                 }
 
                 extractionProgress = Double(index + 1) / Double(items.count)
