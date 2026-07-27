@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import tempfile
 
 
 def read(root: Path, rel: str) -> str:
@@ -47,6 +49,79 @@ def test_shell_run_async_cancels_timeout_watchdog_on_finish(root: Path) -> None:
     assert "attachWatchdog" in body, "runAsync should hand its timeout watchdog to the state so it can be cancelled early"
     assert "pendingWatchdog?.cancel()" in src, "finish should cancel the watchdog so pipe fds are freed the moment the command completes"
     assert "timedOut ? -1 : process.terminationStatus" in body, "runAsync must not read terminationStatus on the timed-out path (process may still be running)"
+
+
+def test_shell_timeouts_cannot_be_reported_as_success(root: Path) -> None:
+    probe = r'''
+import Foundation
+
+actor ErrorStore {
+    private var values: [String] = []
+    func append(_ value: String) { values.append(value) }
+    func snapshot() -> [String] { values }
+}
+
+@main
+struct TimeoutProbe {
+    static func main() async {
+        let command = "trap 'exit 0' TERM; while :; do sleep 1; done"
+
+        let asyncStart = Date()
+        let asyncResult = await Shell.runAsync(
+            "/bin/sh",
+            arguments: ["-c", command],
+            timeout: 0.2
+        )
+        let asyncElapsed = Date().timeIntervalSince(asyncStart)
+
+        let errors = ErrorStore()
+        let streamStart = Date()
+        let streamCode: Int32 = await withCheckedContinuation { continuation in
+            _ = Shell.runStreaming(
+                "/bin/sh",
+                arguments: ["-c", command],
+                timeout: 0.2,
+                onOutput: { _ in },
+                onError: { error in Task { await errors.append(error) } },
+                completion: { continuation.resume(returning: $0) }
+            )
+        }
+        let streamElapsed = Date().timeIntervalSince(streamStart)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        let streamErrors = await errors.snapshot()
+
+        let asyncError = asyncResult.stderr.replacingOccurrences(of: "\n", with: " ")
+        print("ASYNC|\(asyncResult.exitCode)|\(asyncElapsed)|\(asyncError)")
+        print("STREAM|\(streamCode)|\(streamElapsed)|\(streamErrors.joined(separator: " "))")
+    }
+}
+'''
+    stub = "enum PyMobileDevice { static func available() -> Bool { false } }\n"
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp = Path(temp_dir)
+        shell_copy = temp / "Shell.swift"
+        shell_copy.write_text(read(root, "Sources/Phosphor/Utilities/Shell.swift"))
+        (temp / "PyMobileDeviceStub.swift").write_text(stub)
+        (temp / "Probe.swift").write_text(probe)
+        executable = temp / "timeout-probe"
+        compile_result = subprocess.run(
+            ["swiftc", "-parse-as-library", str(shell_copy), str(temp / "PyMobileDeviceStub.swift"), str(temp / "Probe.swift"), "-o", str(executable)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert compile_result.returncode == 0, compile_result.stderr
+        result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
+
+    assert result.returncode == 0, result.stderr
+    records = {line.split("|", 1)[0]: line.split("|", 3)[1:] for line in result.stdout.splitlines() if "|" in line}
+    assert records["ASYNC"][0] == "-2", f"runAsync timeout was reported as exit {records['ASYNC'][0]}"
+    assert records["STREAM"][0] == "-2", f"runStreaming timeout was reported as exit {records['STREAM'][0]}"
+    assert "timed out" in records["ASYNC"][2].lower(), f"runAsync timeout should include a diagnostic: {result.stdout!r}"
+    assert "timed out" in records["STREAM"][2].lower(), "runStreaming timeout should include a diagnostic"
+    assert 0.1 <= float(records["ASYNC"][1]) < 1.5, "runAsync should complete near its timeout"
+    assert 0.1 <= float(records["STREAM"][1]) < 1.5, "runStreaming should complete near its timeout"
 
 
 def test_shell_run_streaming_has_bounded_timeout_and_force_kill(root: Path) -> None:
