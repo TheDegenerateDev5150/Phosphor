@@ -2,7 +2,7 @@ import Foundation
 import Combine
 
 /// Manages iOS device detection and information retrieval.
-/// Primary backend: pymobiledevice3. Fallback: libimobiledevice CLI tools.
+/// Lightweight discovery: libimobiledevice. Detailed info and compatibility fallback: pymobiledevice3.
 @MainActor
 final class DeviceManager: ObservableObject {
 
@@ -17,13 +17,14 @@ final class DeviceManager: ObservableObject {
     private var deviceInfoCache: [String: (device: DeviceInfo, fetchedAt: Date)] = [:]
     private var batteryInfoCache: [String: (info: [String: String], fetchedAt: Date)] = [:]
     private var pairStatusCache: [String: (isPaired: Bool, fetchedAt: Date)] = [:]
-    private var networkDeviceCache: (entries: [PyMobileDevice.DeviceEntry], fetchedAt: Date)?
     private var bonjourDeviceCache: (devices: [PyMobileDevice.BonjourDevice], fetchedAt: Date)?
+    private var compatibilityOnlyDeviceEntries: [PyMobileDevice.DeviceEntry] = []
+    private var lastCompatibilityDiscoveryAt = Date()
     private let deviceInfoRefreshInterval: TimeInterval = 30
     private let batteryInfoRefreshInterval: TimeInterval = 60
     private let pairStatusRefreshInterval: TimeInterval = 120
-    private let networkDeviceRefreshInterval: TimeInterval = 30
     private let bonjourDeviceRefreshInterval: TimeInterval = 30
+    private let compatibilityDiscoveryInterval: TimeInterval = 30
 
     // MARK: - Dependency Check
 
@@ -55,18 +56,19 @@ final class DeviceManager: ObservableObject {
         lastError = nil
         defer { isScanning = false }
 
-        // Primary: pymobiledevice3. Merge the standard usbmux snapshot with the
-        // network-only snapshot so devices already paired to this Mac over Wi-Fi
-        // can appear even when no USB cable is attached.
-        var entries = await PyMobileDevice.listDevicesWithType()
-        if !entries.contains(where: { $0.discoveryMethod == "mobdev2" }) {
-            entries = mergeDeviceEntries(entries + (await cachedNetworkDeviceEntries(forceRefresh: forceRefresh)))
+        // Routine polling uses libimobiledevice discovery because it is a tiny
+        // native probe. Starting pymobiledevice3 twice every few seconds costs
+        // substantially more CPU. Explicit refreshes and systems without both
+        // idevice_id transports retain the full pymobiledevice3 compatibility path.
+        let lightweightScan = await listLibimobiledeviceEntries()
+        let compatibilityScanIsDue = Date().timeIntervalSince(lastCompatibilityDiscoveryAt) >= compatibilityDiscoveryInterval
+        if forceRefresh || !lightweightScan.isAvailable || compatibilityScanIsDue {
+            lastCompatibilityDiscoveryAt = Date()
+            let pyEntries = await PyMobileDevice.listDevicesWithType()
+            let lightweightIDs = Set(lightweightScan.entries.map(\.udid))
+            compatibilityOnlyDeviceEntries = pyEntries.filter { !lightweightIDs.contains($0.udid) }
         }
-
-        // Fallback: libimobiledevice. Include both USB and network-only listings.
-        if entries.isEmpty {
-            entries = await listLibimobiledeviceEntries()
-        }
+        let entries = mergeDeviceEntries(lightweightScan.entries + compatibilityOnlyDeviceEntries)
 
         if entries.isEmpty {
             let bonjourDevices = await cachedBonjourDevices(forceRefresh: forceRefresh)
@@ -76,7 +78,6 @@ final class DeviceManager: ObservableObject {
             deviceInfoCache.removeAll()
             batteryInfoCache.removeAll()
             pairStatusCache.removeAll()
-            networkDeviceCache = nil
             return
         }
 
@@ -115,17 +116,6 @@ final class DeviceManager: ObservableObject {
         }
     }
 
-    private func cachedNetworkDeviceEntries(forceRefresh: Bool = false) async -> [PyMobileDevice.DeviceEntry] {
-        if !forceRefresh,
-           let cached = networkDeviceCache,
-           Date().timeIntervalSince(cached.fetchedAt) < networkDeviceRefreshInterval {
-            return cached.entries
-        }
-        let entries = await PyMobileDevice.listNetworkDeviceEntries()
-        networkDeviceCache = (entries, Date())
-        return entries
-    }
-
     private func cachedBonjourDevices(forceRefresh: Bool = false) async -> [PyMobileDevice.BonjourDevice] {
         if !forceRefresh,
            let cached = bonjourDeviceCache,
@@ -137,9 +127,14 @@ final class DeviceManager: ObservableObject {
         return devices
     }
 
-    private func listLibimobiledeviceEntries() async -> [PyMobileDevice.DeviceEntry] {
-        async let usbResult = Shell.runAsync("idevice_id", arguments: ["-l"])
-        async let networkResult = Shell.runAsync("idevice_id", arguments: ["-n"])
+    private struct LibimobiledeviceScan {
+        let isAvailable: Bool
+        let entries: [PyMobileDevice.DeviceEntry]
+    }
+
+    private func listLibimobiledeviceEntries() async -> LibimobiledeviceScan {
+        async let usbResult = Shell.runAsync("idevice_id", arguments: ["-l"], timeout: 5)
+        async let networkResult = Shell.runAsync("idevice_id", arguments: ["-n"], timeout: 5)
 
         var entries: [PyMobileDevice.DeviceEntry] = []
         let usb = await usbResult
@@ -152,7 +147,10 @@ final class DeviceManager: ObservableObject {
             entries += parseLibimobiledeviceUDIDs(network.output, connectionType: "Network")
         }
 
-        return mergeDeviceEntries(entries)
+        return LibimobiledeviceScan(
+            isAvailable: usb.succeeded && network.succeeded,
+            entries: mergeDeviceEntries(entries)
+        )
     }
 
     private func parseLibimobiledeviceUDIDs(_ output: String, connectionType: String) -> [PyMobileDevice.DeviceEntry] {
@@ -405,7 +403,6 @@ final class DeviceManager: ObservableObject {
 
     private func invalidateConnectionCaches(for udid: String) {
         deviceInfoCache.removeValue(forKey: udid)
-        networkDeviceCache = nil
         bonjourDeviceCache = nil
     }
 

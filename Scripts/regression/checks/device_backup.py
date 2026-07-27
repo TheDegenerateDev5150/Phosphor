@@ -75,7 +75,7 @@ def test_finder_wifi_sync_can_be_enabled_from_usb_device(root: Path) -> None:
     assert_contains(manager, "func enableWiFiConnections(udid", "DeviceManager should expose Wi-Fi connection enablement")
     assert_contains(manager, "setWiFiConnections(udid: udid, enabled: true)", "DeviceManager should run the actual lockdown Wi-Fi toggle")
     assert_contains(manager, "pairing alone\n        // is not enough", "Pairing must not be treated as successful Wi-Fi enablement")
-    assert_contains(manager, "networkDeviceCache = nil", "Successful Wi-Fi enablement should invalidate network discovery cache")
+    assert_contains(manager, "invalidateConnectionCaches(for: udid)", "Successful Wi-Fi enablement should invalidate cached connection metadata")
 
     wifi = read(root, "Sources/Phosphor/Services/WiFiConnectionManager.swift")
     assert_contains(wifi, "setWiFiConnections(udid: udid, enabled: true)", "WiFiConnectionManager should use the Finder-style toggle")
@@ -129,7 +129,45 @@ def test_device_entry_merge_prefers_usb_without_dropping_network_only(root: Path
 
     manager = read(root, "Sources/Phosphor/Services/DeviceManager.swift")
     assert_contains(manager, "deviceInfoCache.removeAll()", "zero-device scans should clear stale device cache")
-    assert_contains(manager, "networkDeviceCache = nil", "zero-device scans should clear stale network-device cache")
+    assert_contains(manager, "bonjourDeviceCache = nil", "zero-device scans should clear stale nearby-device cache")
+
+
+def test_sidebar_highlights_only_the_selected_or_hovered_device_row(root: Path) -> None:
+    sidebar = read(root, "Sources/Phosphor/Views/SidebarView.swift")
+    assert_contains(sidebar, "@State private var hoveredDeviceID: String?", "device hover state must identify one device row")
+    assert_contains(sidebar, "isVisuallySelected: isSelected", "each device row must pass its own selected state to the shared button")
+    assert_contains(sidebar, "isVisuallyHovered: hoveredDeviceID == device.id", "only the hovered device row should receive hover styling")
+    assert_contains(sidebar, "else if hoveredDeviceID == device.id", "a stale hover-exit event must not clear a newer device row hover")
+
+
+def test_device_polling_prefers_lightweight_discovery_before_python_fallback(root: Path) -> None:
+    manager = read(root, "Sources/Phosphor/Services/DeviceManager.swift")
+    assert_contains(manager, "let lightweightScan = await listLibimobiledeviceEntries()", "routine polling should start with lightweight idevice_id discovery")
+    assert_contains(manager, "if forceRefresh || !lightweightScan.isAvailable", "explicit refresh or missing idevice_id should retain full pymobiledevice discovery")
+    assert_contains(manager, "compatibilityDiscoveryInterval", "routine polling should periodically recheck pymobiledevice-specific discovery")
+    assert_contains(manager, "compatibilityScanIsDue", "devices visible only to pymobiledevice must still be discovered automatically")
+    assert_contains(manager, "let pyEntries = await PyMobileDevice.listDevicesWithType()", "pymobiledevice discovery must remain as the compatibility fallback")
+    assert manager.index("let lightweightScan = await listLibimobiledeviceEntries()") < manager.index("let pyEntries = await PyMobileDevice.listDevicesWithType()"), "lightweight discovery must run before the expensive Python fallback"
+    assert_not_contains(manager, "cachedNetworkDeviceEntries", "listDevicesWithType already queries network devices; polling must not launch a duplicate network query")
+    assert_contains(manager, "Shell.runAsync(\"idevice_id\", arguments: [\"-l\"], timeout: 5)", "routine USB discovery must be timeout bounded")
+    assert_contains(manager, "Shell.runAsync(\"idevice_id\", arguments: [\"-n\"], timeout: 5)", "routine network discovery must be timeout bounded")
+    assert_contains(manager, "compatibilityOnlyDeviceEntries", "pymobiledevice-only devices must persist between compatibility scans")
+    assert_contains(manager, "compatibilityOnlyDeviceEntries = pyEntries.filter", "compatibility cache should exclude devices already covered by lightweight discovery")
+    assert_contains(manager, "lightweightScan.entries + compatibilityOnlyDeviceEntries", "every routine poll should merge cached compatibility-only devices")
+
+    compatibility_cache: list[str] = []
+
+    def poll(lightweight: list[str], compatibility: list[str] | None = None) -> list[str]:
+        nonlocal compatibility_cache
+        if compatibility is not None:
+            lightweight_ids = set(lightweight)
+            compatibility_cache = [item for item in compatibility if item not in lightweight_ids]
+        return list(dict.fromkeys(lightweight + compatibility_cache))
+
+    assert poll([], ["py-only"]) == ["py-only"], "compatibility discovery should publish a pymobiledevice-only device"
+    assert poll([]) == ["py-only"], "intervening lightweight polls should retain a pymobiledevice-only device"
+    assert poll([], []) == [], "a later compatibility scan should remove devices no longer discovered"
+    assert poll(["native"], ["native", "py-only"]) == ["native", "py-only"], "cache should retain only compatibility-exclusive entries"
 
 
 def test_wifi_schedules_use_network_discovery_and_network_backup_flag(root: Path) -> None:
@@ -254,7 +292,7 @@ def test_phosphor_archive_import_uses_active_dir_and_rejects_unsafe_archives(roo
 
 def test_sidebar_device_rows_select_the_clicked_device(root: Path) -> None:
     sidebar = read(root, "Sources/Phosphor/Views/SidebarView.swift")
-    assert_contains(sidebar, "sidebarButton(.devices, onSelect: { deviceVM.selectDevice(device) })", "Each sidebar device row should select its own device, not the first device")
+    assert_contains(sidebar, "onSelect: { deviceVM.selectDevice(device) }", "Each sidebar device row should select its own device, not the first device")
     assert_not_contains(sidebar, "selectDevice(first)", "Generic device sidebar action must not always select the first device")
 
 

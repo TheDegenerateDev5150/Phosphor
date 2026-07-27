@@ -113,6 +113,7 @@ struct SidebarView: View {
     @EnvironmentObject var deviceVM: DeviceViewModel
     @EnvironmentObject var backupVM: BackupViewModel
     @State private var hoveredSection: SidebarSection?
+    @State private var hoveredDeviceID: String?
 
     var body: some View {
         List {
@@ -194,7 +195,19 @@ struct SidebarView: View {
     /// model/iOS subtitle, right-aligned battery percentage.
     private func deviceRow(_ device: DeviceInfo) -> some View {
         let isSelected = selection == .devices && deviceVM.selectedDevice?.id == device.id
-        return sidebarButton(.devices, onSelect: { deviceVM.selectDevice(device) }) {
+        return sidebarButton(
+            .devices,
+            isVisuallySelected: isSelected,
+            isVisuallyHovered: hoveredDeviceID == device.id,
+            onSelect: { deviceVM.selectDevice(device) },
+            onHover: { hovering in
+                if hovering {
+                    hoveredDeviceID = device.id
+                } else if hoveredDeviceID == device.id {
+                    hoveredDeviceID = nil
+                }
+            }
+        ) {
             HStack(spacing: 9) {
                 ZStack(alignment: .bottomTrailing) {
                     Image(systemName: device.sfSymbolName)
@@ -260,10 +273,14 @@ struct SidebarView: View {
     /// Base button for sidebar items. Uses Button instead of List selection for reliability.
     private func sidebarButton<Content: View>(
         _ section: SidebarSection,
+        isVisuallySelected: Bool? = nil,
+        isVisuallyHovered: Bool? = nil,
         onSelect: (() -> Void)? = nil,
+        onHover: ((Bool) -> Void)? = nil,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        let isSelected = selection == section
+        let isSelected = isVisuallySelected ?? (selection == section)
+        let isHovered = isVisuallyHovered ?? (hoveredSection == section)
         return Button {
             selection = section
             onSelect?()
@@ -277,14 +294,18 @@ struct SidebarView: View {
                         .fill(
                             isSelected
                                 ? Color.brandAccent.opacity(0.14)
-                                : (hoveredSection == section ? Color.primary.opacity(0.05) : Color.clear)
+                                : (isHovered ? Color.primary.opacity(0.05) : Color.clear)
                         )
                 )
                 .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
         .buttonStyle(.plain)
         .onHover { hovering in
-            hoveredSection = hovering ? section : nil
+            if let onHover {
+                onHover(hovering)
+            } else {
+                hoveredSection = hovering ? section : nil
+            }
         }
     }
 }
