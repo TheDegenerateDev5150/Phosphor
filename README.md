@@ -317,6 +317,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 - [ifuse](https://github.com/libimobiledevice/ifuse) - FUSE filesystem for iOS devices (legacy)
 - Apple's SF Symbols for iconography
 
+## Also try
+
+[JMacy](https://jmacy.xyz) - the best and fastest downloader for macOS. Multi-connection segmented downloads that saturate your line, plus browser capture and torrents.
+
 ## License
 
 [MIT](LICENSE) - Use it, fork it, ship it.
